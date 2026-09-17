@@ -1,0 +1,11 @@
+[package]
+name = "taskharbor-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+taskharbor-core = { path = "../../crates/core" }
+
+[lints]
+workspace = true
