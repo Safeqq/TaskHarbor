@@ -4,15 +4,15 @@ TaskHarbor is a learning-focused portfolio project for creating, scheduling, run
 
 ## Current milestone
 
-Phase 2 persists jobs in PostgreSQL and runs them in a separate worker process. The current `demo_delay` job waits asynchronously for 500 milliseconds, then records its result and attempt history.
+Phase 3 adds a React and TypeScript dashboard to the persistent job pipeline. The dashboard creates `demo_delay` jobs, polls their state every two seconds, and shows progress, timestamps, and worker results without a manual refresh.
 
 The current request flow is:
 
-1. Axum parses the HTTP request and JSON body.
-2. The core library validates the job name.
+1. React submits the labelled create form through the frontend API client.
+2. Vite proxies the development request to Axum, which validates the job name.
 3. PostgreSQL assigns an ID and saves a queued job.
-4. The API returns the persisted job as JSON.
-5. The worker claims one eligible job in a short transaction, releases the row lock, waits asynchronously, and records completion in a new transaction.
+4. The worker claims one eligible job in a short transaction, releases the row lock, waits asynchronously, and records completion in a new transaction.
+5. Sequential polling reads the new state and updates the list and selected job detail.
 
 Jobs survive API and worker restarts. Crash recovery is intentionally deferred: if the worker dies after a claim, that job remains `running` until it is reset manually in the local demo database.
 
@@ -21,6 +21,7 @@ Jobs survive API and worker restarts. Crash recovery is intentionally deferred: 
 ```text
 apps/api/          HTTP transport and API executable
 apps/worker/       Job execution loop and worker executable
+apps/web/          React dashboard, API client, polling, and UI tests
 crates/adapters/   PostgreSQL repository and atomic queue claim
 crates/core/       Domain types and validation rules
 migrations/        Append-only PostgreSQL schema changes
@@ -33,10 +34,11 @@ The remaining target structure will be added only when its roadmap phase needs i
 ## Requirements
 
 - Rust 1.95.0 with Cargo, rustfmt, and Clippy
+- Node.js 24.11.1 with npm 11.6.2
 - Git
 - PostgreSQL 18, either through Docker Compose or a local installation
 
-Node.js will be needed when the dashboard is added. Docker is optional when PostgreSQL is installed directly.
+Docker is optional when PostgreSQL is installed directly.
 
 ## Run locally
 
@@ -61,6 +63,15 @@ Start the worker in a second terminal with the same `DATABASE_URL`:
 $env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:5432/taskharbor"
 cargo run -p taskharbor-worker --locked
 ```
+
+Install and start the dashboard in a third terminal:
+
+```powershell
+npm ci --prefix apps/web
+npm run dev --prefix apps/web
+```
+
+Open `http://127.0.0.1:5173`. The Vite development server proxies `/api` and `/health` to the API at `http://127.0.0.1:3000`, so no browser CORS configuration is needed for local development.
 
 Both executables apply pending migrations before doing other work. The API listens on `127.0.0.1:3000` by default; `TASKHARBOR_BIND_ADDR` can override it.
 
@@ -116,6 +127,9 @@ Validation and parsing errors use a consistent envelope:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+npm run typecheck --prefix apps/web
+npm test --prefix apps/web
+npm run build --prefix apps/web
 ```
 
 Database integration tests use the isolated test database and are opt-in:
