@@ -1,16 +1,14 @@
 mod error;
 mod http;
-mod store;
 
 use axum::Router;
+use taskharbor_adapters::PgJobRepository;
 
-use store::MemoryJobStore;
-
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AppState {
-    jobs: MemoryJobStore,
+    jobs: PgJobRepository,
 }
 
-pub fn app() -> Router {
-    http::router(AppState::default())
+pub fn app(jobs: PgJobRepository) -> Router {
+    http::router(AppState { jobs })
 }

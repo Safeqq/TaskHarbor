@@ -2,9 +2,8 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use taskharbor_adapters::RepositoryError;
 use taskharbor_core::JobNameError;
-
-use crate::store::StoreError;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -42,12 +41,18 @@ impl ApiError {
         }
     }
 
-    pub fn store(error: StoreError) -> Self {
+    pub fn repository(error: RepositoryError) -> Self {
         match error {
-            StoreError::IdExhausted => Self {
+            RepositoryError::Database(_) | RepositoryError::Migration(_) => Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "database_unavailable",
+                message: "the database is temporarily unavailable".into(),
+                field: None,
+            },
+            RepositoryError::InvalidData(_) | RepositoryError::StateConflict(_) => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 code: "internal_error",
-                message: "the job could not be created".into(),
+                message: "the request could not be completed".into(),
                 field: None,
             },
         }

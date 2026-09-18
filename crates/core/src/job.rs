@@ -9,7 +9,7 @@ pub struct JobId(u64);
 
 impl JobId {
     pub const fn new(value: u64) -> Result<Self, JobIdError> {
-        if value == 0 {
+        if value == 0 || value > i64::MAX as u64 {
             return Err(JobIdError);
         }
 
@@ -41,7 +41,7 @@ pub struct JobIdError;
 
 impl Display for JobIdError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(formatter, "job ID must be a positive integer")
+        write!(formatter, "job ID must be a positive signed 64-bit integer")
     }
 }
 
@@ -100,7 +100,46 @@ impl Error for JobNameError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
     Queued,
+    Running,
+    Succeeded,
+    Failed,
 }
+
+impl JobStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl FromStr for JobStatus {
+    type Err = JobStatusParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            _ => Err(JobStatusParseError),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobStatusParseError;
+
+impl Display for JobStatusParseError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "job status is not recognized")
+    }
+}
+
+impl Error for JobStatusParseError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
@@ -126,6 +165,10 @@ impl Job {
         self.status
     }
 
+    pub const fn restore(id: JobId, name: JobName, status: JobStatus) -> Self {
+        Self { id, name, status }
+    }
+
     pub fn name(&self) -> &JobName {
         &self.name
     }
@@ -133,7 +176,10 @@ impl Job {
 
 #[cfg(test)]
 mod tests {
-    use super::{Job, JobId, JobIdError, JobName, JobNameError, JobStatus, MAX_JOB_NAME_LENGTH};
+    use super::{
+        Job, JobId, JobIdError, JobName, JobNameError, JobStatus, JobStatusParseError,
+        MAX_JOB_NAME_LENGTH,
+    };
 
     #[test]
     fn accepts_a_name_at_the_maximum_length() {
@@ -172,6 +218,11 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_job_id_above_the_database_range() {
+        assert_eq!(JobId::new(u64::MAX), Err(JobIdError));
+    }
+
+    #[test]
     fn creates_a_job_in_the_queued_state() {
         let id = JobId::new(1).expect("test ID should be valid");
         let name = JobName::new("resize profile images").expect("test name should be valid");
@@ -180,5 +231,14 @@ mod tests {
 
         assert_eq!(job.id(), id);
         assert_eq!(job.status(), JobStatus::Queued);
+    }
+
+    #[test]
+    fn parses_persisted_job_statuses() {
+        assert_eq!("queued".parse(), Ok(JobStatus::Queued));
+        assert_eq!("running".parse(), Ok(JobStatus::Running));
+        assert_eq!("succeeded".parse(), Ok(JobStatus::Succeeded));
+        assert_eq!("failed".parse(), Ok(JobStatus::Failed));
+        assert_eq!("unknown".parse::<JobStatus>(), Err(JobStatusParseError));
     }
 }
