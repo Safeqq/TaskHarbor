@@ -4,17 +4,21 @@ TaskHarbor is a learning-focused portfolio project for creating, running, and mo
 
 ## Current milestone
 
-Phase 4 adds a complete `image_resize` pipeline. The dashboard uploads up to ten JPEG or PNG inputs, the API validates their actual content and metadata, and the worker publishes downloadable JPEG outputs with per-item progress.
+Phase 5 makes the `image_resize` pipeline resilient and controllable. Jobs now have bounded automatic retries, cooperative cancellation, safe attempt history, and manual retry as a linked new job.
 
 The current request flow is:
 
 1. React sends multipart form data with the job settings and source images.
 2. Axum streams each file to a server-generated storage key while enforcing count and byte limits.
 3. Image headers are inspected to verify JPEG or PNG content, dimensions, megapixels, and the absence of PNG animation before PostgreSQL records the queued job.
-4. The worker claims the job, runs bounded image work outside Tokio's async threads, preserves aspect ratio without upscaling, and flattens transparency onto white.
-5. PostgreSQL publishes the complete output manifest only after every item succeeds. The dashboard polls progress and exposes the resulting JPEG downloads.
+4. The worker claims an eligible `queued` or `retry_waiting` job and creates a numbered attempt before doing work outside Tokio's async threads.
+5. A transient image I/O failure records the attempt and schedules another one with exponential backoff. A permanent input/settings failure, or an exhausted attempt limit, ends the job as `failed`.
+6. A pending job can be cancelled immediately. A running job moves to `cancel_requested`; the worker checks that request between items and before the conditional output publication.
+7. PostgreSQL publishes the complete output manifest only after every item succeeds. The dashboard shows lifecycle actions, retry timing, and the history of each attempt.
 
-Jobs survive API and worker restarts. Crash recovery is intentionally deferred: if the worker dies after a claim, that job remains `running` until it is reset manually in the local demo database.
+The default `max_attempts` is three, including the first attempt. Manual retry leaves a terminal job and its history unchanged, creates a linked job through `retry_of_job_id`, and reuses the same source files.
+
+Jobs survive API and worker restarts. Crash recovery is intentionally deferred: if the worker dies after a claim, that job remains `running` until it is reset manually in the local demo database. Cancellation is cooperative and cannot interrupt image code already running inside `spawn_blocking`; it takes effect at the next safe boundary.
 
 ## Repository structure
 
@@ -87,6 +91,8 @@ TaskHarbor API listening on http://127.0.0.1:3000
 | `POST` | `/api/v1/jobs` | Create a queued job |
 | `GET` | `/api/v1/jobs` | List jobs by ascending ID |
 | `GET` | `/api/v1/jobs/{id}` | Read one job or return `404` |
+| `POST` | `/api/v1/jobs/{id}/cancel` | Cancel a pending job or request cancellation of a running job |
+| `POST` | `/api/v1/jobs/{id}/retry` | Create a linked retry of a failed or cancelled job |
 | `GET` | `/api/v1/artifacts/{id}/download` | Download a published JPEG output |
 
 Create a job:
@@ -106,11 +112,18 @@ Windows PowerShell passes quotes to native programs differently. This equivalent
 curl.exe --request POST --form "name=resize avatars" --form "max_width=1600" --form "jpeg_quality=85" --form "images=@avatar.png" http://127.0.0.1:3000/api/v1/jobs
 ```
 
-List and read jobs while the worker changes their state from `queued` to `running` and then `succeeded`:
+List and read jobs while the worker changes their state. The possible states are `queued`, `running`, `retry_waiting`, `cancel_requested`, `succeeded`, `failed`, and `cancelled`:
 
 ```bash
 curl -i http://127.0.0.1:3000/api/v1/jobs
 curl -i http://127.0.0.1:3000/api/v1/jobs/1
+```
+
+Cancel a pending/running job, or create a new linked job after failure or cancellation:
+
+```bash
+curl -i -X POST http://127.0.0.1:3000/api/v1/jobs/1/cancel
+curl -i -X POST http://127.0.0.1:3000/api/v1/jobs/1/retry
 ```
 
 Validation and parsing errors use a consistent envelope:

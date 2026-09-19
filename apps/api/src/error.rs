@@ -111,7 +111,13 @@ impl ApiError {
                 message: "the database is temporarily unavailable".into(),
                 field: None,
             },
-            RepositoryError::InvalidData(_) | RepositoryError::StateConflict(_) => Self {
+            RepositoryError::StateConflict(_) => Self {
+                status: StatusCode::CONFLICT,
+                code: "job_state_conflict",
+                message: "the job is no longer in a state that allows this action".into(),
+                field: None,
+            },
+            RepositoryError::InvalidData(_) => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 code: "internal_error",
                 message: "the request could not be completed".into(),

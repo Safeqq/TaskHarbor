@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CreateJobForm } from "./features/jobs/CreateJobForm";
 import { JobDetail } from "./features/jobs/JobDetail";
 import { JobList } from "./features/jobs/JobList";
-import { formatRefreshTime } from "./features/jobs/format";
+import { formatRefreshTime, statusLabel } from "./features/jobs/format";
 import type { Job, JobStatus } from "./features/jobs/api";
 import {
   DEFAULT_POLL_INTERVAL_MS,
@@ -14,7 +14,15 @@ interface AppProps {
   pollIntervalMs?: number;
 }
 
-const statuses: JobStatus[] = ["queued", "running", "succeeded", "failed"];
+const statuses: JobStatus[] = [
+  "queued",
+  "running",
+  "retry_waiting",
+  "cancel_requested",
+  "succeeded",
+  "failed",
+  "cancelled",
+];
 
 export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppProps) {
   const {
@@ -47,7 +55,15 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
           ...counts,
           [status]: jobs.filter((job) => job.status === status).length,
         }),
-        { queued: 0, running: 0, succeeded: 0, failed: 0 },
+        {
+          queued: 0,
+          running: 0,
+          retry_waiting: 0,
+          cancel_requested: 0,
+          succeeded: 0,
+          failed: 0,
+          cancelled: 0,
+        },
       ),
     [jobs],
   );
@@ -55,6 +71,11 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
   const handleCreated = (job: Job) => {
     upsertJob(job);
     setSelectedId(job.id);
+    refresh();
+  };
+
+  const handleUpdated = (job: Job) => {
+    upsertJob(job);
     refresh();
   };
 
@@ -120,7 +141,7 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
             <article className={`status-stat status-stat--${status}`} key={status}>
               <span className="status-stat__label">
                 <span aria-hidden="true" />
-                {status}
+                {statusLabel(status)}
               </span>
               <strong>{statusCounts[status]}</strong>
             </article>
@@ -171,7 +192,7 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
           </section>
         </div>
 
-        <JobDetail job={selectedJob} />
+        <JobDetail job={selectedJob} onUpdated={handleUpdated} onRetried={handleCreated} />
       </main>
 
       <footer>

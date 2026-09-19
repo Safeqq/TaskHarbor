@@ -12,6 +12,7 @@ use image::{DynamicImage, ImageFormat, ImageReader, Limits, Rgb, RgbImage};
 use tokio::sync::Semaphore;
 use tokio::task::{JoinError, spawn_blocking};
 
+use crate::lifecycle_repository::FailureKind;
 use crate::{LocalStorage, StorageError};
 
 pub const MAX_FILES_PER_JOB: usize = 10;
@@ -278,6 +279,21 @@ impl ImageError {
             }
         }
     }
+
+    pub const fn failure_kind(&self) -> FailureKind {
+        match self {
+            Self::Decode(_)
+            | Self::UnsupportedFormat
+            | Self::AnimatedPng
+            | Self::DimensionsTooLarge
+            | Self::InvalidSettings
+            | Self::Storage(StorageError::InvalidKey) => FailureKind::Permanent,
+            Self::Io(_)
+            | Self::Storage(StorageError::Io(_))
+            | Self::Join(_)
+            | Self::BlockingLimitClosed => FailureKind::Transient,
+        }
+    }
 }
 
 impl Display for ImageError {
@@ -346,7 +362,7 @@ mod tests {
     use image::{ColorType, GenericImageView, ImageEncoder, ImageReader, Rgba, RgbaImage};
 
     use super::ImageService;
-    use crate::LocalStorage;
+    use crate::{FailureKind, LocalStorage};
 
     #[tokio::test]
     async fn detects_content_resizes_without_upscaling_and_flattens_alpha() {
@@ -426,6 +442,12 @@ mod tests {
             .await
             .expect_err("non-image content should be rejected");
         assert!(error.is_invalid_input());
+        assert_eq!(error.failure_kind(), FailureKind::Permanent);
+        let missing = images
+            .inspect("inputs/test/missing-image")
+            .await
+            .expect_err("missing input should be an I/O failure");
+        assert_eq!(missing.failure_kind(), FailureKind::Transient);
         assert!(storage.resolve_key("../outside").is_err());
         assert!(storage.resolve_key("/absolute").is_err());
     }

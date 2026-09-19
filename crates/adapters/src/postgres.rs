@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 use crate::image_repository::{
     ArtifactKind, ArtifactRecord, JobSettings, load_artifacts, load_input_artifacts,
 };
+use crate::lifecycle_repository::{AttemptRecord, MAX_ATTEMPTS, load_attempts};
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
@@ -66,6 +67,10 @@ impl PgJobRepository {
                 result_message,
                 result_duration_ms,
                 failure_message,
+                available_at,
+                max_attempts,
+                retry_of_job_id,
+                cancel_requested_at,
                 created_at,
                 started_at,
                 finished_at
@@ -76,7 +81,7 @@ impl PgJobRepository {
         .fetch_one(&self.pool)
         .await?;
 
-        row.try_into_record(Vec::new())
+        row.try_into_record(Vec::new(), Vec::new())
     }
 
     pub async fn list(&self) -> Result<Vec<JobRecord>, RepositoryError> {
@@ -95,6 +100,10 @@ impl PgJobRepository {
                 result_message,
                 result_duration_ms,
                 failure_message,
+                available_at,
+                max_attempts,
+                retry_of_job_id,
+                cancel_requested_at,
                 created_at,
                 started_at,
                 finished_at
@@ -108,7 +117,8 @@ impl PgJobRepository {
         let mut jobs = Vec::with_capacity(rows.len());
         for row in rows {
             let artifacts = load_artifacts(&self.pool, row.id).await?;
-            jobs.push(row.try_into_record(artifacts)?);
+            let attempts = load_attempts(&self.pool, row.id).await?;
+            jobs.push(row.try_into_record(artifacts, attempts)?);
         }
         Ok(jobs)
     }
@@ -129,6 +139,10 @@ impl PgJobRepository {
                 result_message,
                 result_duration_ms,
                 failure_message,
+                available_at,
+                max_attempts,
+                retry_of_job_id,
+                cancel_requested_at,
                 created_at,
                 started_at,
                 finished_at
@@ -144,7 +158,8 @@ impl PgJobRepository {
             return Ok(None);
         };
         let artifacts = load_artifacts(&self.pool, row.id).await?;
-        Ok(Some(row.try_into_record(artifacts)?))
+        let attempts = load_attempts(&self.pool, row.id).await?;
+        Ok(Some(row.try_into_record(artifacts, attempts)?))
     }
 
     pub async fn claim_next(&self) -> Result<Option<ClaimedJob>, RepositoryError> {
@@ -157,9 +172,10 @@ impl PgJobRepository {
                 delay_ms,
                 max_width,
                 jpeg_quality,
-                progress_total
+                progress_total,
+                max_attempts
             FROM jobs
-            WHERE state = 'queued'
+            WHERE state IN ('queued', 'retry_waiting')
               AND available_at <= CURRENT_TIMESTAMP
             ORDER BY available_at, id
             FOR UPDATE SKIP LOCKED
@@ -189,19 +205,24 @@ impl PgJobRepository {
         .bind(candidate.id)
         .fetch_one(&mut *transaction)
         .await?;
+        if attempt_number > candidate.max_attempts {
+            return Err(RepositoryError::InvalidData(
+                "job has no remaining attempts".into(),
+            ));
+        }
 
         let updated = sqlx::query(
             r#"
             UPDATE jobs
             SET state = 'running',
-                started_at = CURRENT_TIMESTAMP,
+                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                 progress_completed = 0,
                 result_message = NULL,
                 result_duration_ms = NULL,
                 failure_message = NULL,
                 finished_at = NULL
             WHERE id = $1
-              AND state = 'queued'
+              AND state IN ('queued', 'retry_waiting')
             "#,
         )
         .bind(candidate.id)
@@ -257,6 +278,8 @@ impl PgJobRepository {
         Ok(Some(ClaimedJob {
             job_id,
             attempt_id,
+            attempt_number: decode_u32(attempt_number, "attempt number")?,
+            max_attempts: decode_u32(candidate.max_attempts, "max attempts")?,
             work,
         }))
     }
@@ -332,6 +355,11 @@ pub struct JobRecord {
     result_duration_ms: Option<u64>,
     failure_message: Option<String>,
     artifacts: Vec<ArtifactRecord>,
+    attempts: Vec<AttemptRecord>,
+    available_at: OffsetDateTime,
+    max_attempts: u32,
+    retry_of_job_id: Option<JobId>,
+    cancel_requested_at: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     finished_at: Option<OffsetDateTime>,
@@ -378,6 +406,26 @@ impl JobRecord {
             .filter(|artifact| artifact.kind() == ArtifactKind::Output)
     }
 
+    pub fn attempts(&self) -> impl Iterator<Item = &AttemptRecord> {
+        self.attempts.iter()
+    }
+
+    pub const fn available_at(&self) -> OffsetDateTime {
+        self.available_at
+    }
+
+    pub const fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    pub const fn retry_of_job_id(&self) -> Option<JobId> {
+        self.retry_of_job_id
+    }
+
+    pub const fn cancel_requested_at(&self) -> Option<OffsetDateTime> {
+        self.cancel_requested_at
+    }
+
     pub const fn created_at(&self) -> OffsetDateTime {
         self.created_at
     }
@@ -395,6 +443,8 @@ impl JobRecord {
 pub struct ClaimedJob {
     job_id: JobId,
     attempt_id: i64,
+    attempt_number: u32,
+    max_attempts: u32,
     work: ClaimedWork,
 }
 
@@ -405,6 +455,14 @@ impl ClaimedJob {
 
     pub const fn attempt_id(&self) -> i64 {
         self.attempt_id
+    }
+
+    pub const fn attempt_number(&self) -> u32 {
+        self.attempt_number
+    }
+
+    pub const fn max_attempts(&self) -> u32 {
+        self.max_attempts
     }
 
     pub const fn work(&self) -> &ClaimedWork {
@@ -483,13 +541,21 @@ struct JobRow {
     result_message: Option<String>,
     result_duration_ms: Option<i64>,
     failure_message: Option<String>,
+    available_at: OffsetDateTime,
+    max_attempts: i32,
+    retry_of_job_id: Option<i64>,
+    cancel_requested_at: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     finished_at: Option<OffsetDateTime>,
 }
 
 impl JobRow {
-    fn try_into_record(self, artifacts: Vec<ArtifactRecord>) -> Result<JobRecord, RepositoryError> {
+    fn try_into_record(
+        self,
+        artifacts: Vec<ArtifactRecord>,
+        attempts: Vec<AttemptRecord>,
+    ) -> Result<JobRecord, RepositoryError> {
         let id = decode_job_id(self.id)?;
         let name = JobName::new(self.name)
             .map_err(|error| RepositoryError::InvalidData(error.to_string()))?;
@@ -507,6 +573,12 @@ impl JobRow {
         if progress_total == 0 || progress_completed > progress_total {
             return Err(RepositoryError::InvalidData(
                 "job progress violates its invariant".into(),
+            ));
+        }
+        let max_attempts = decode_u32(self.max_attempts, "max_attempts")?;
+        if max_attempts == 0 || max_attempts > MAX_ATTEMPTS {
+            return Err(RepositoryError::InvalidData(
+                "max attempts violates its invariant".into(),
             ));
         }
 
@@ -540,6 +612,11 @@ impl JobRow {
                 .transpose()?,
             failure_message: self.failure_message,
             artifacts,
+            attempts,
+            available_at: self.available_at,
+            max_attempts,
+            retry_of_job_id: self.retry_of_job_id.map(decode_job_id).transpose()?,
+            cancel_requested_at: self.cancel_requested_at,
             created_at: self.created_at,
             started_at: self.started_at,
             finished_at: self.finished_at,
@@ -555,6 +632,7 @@ struct ClaimRow {
     max_width: Option<i32>,
     jpeg_quality: Option<i16>,
     progress_total: i32,
+    max_attempts: i32,
 }
 
 pub(crate) fn decode_job_id(value: i64) -> Result<JobId, RepositoryError> {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, createImageJob, listJobs, type Job } from "./api";
+import { ApiError, cancelJob, createImageJob, listJobs, retryJob, type Job } from "./api";
 
 const job: Job = {
   id: 12,
@@ -28,8 +28,13 @@ const job: Job = {
     },
   ],
   outputs: [],
+  attempts: [],
+  available_at: "2026-09-18T08:00:00Z",
+  max_attempts: 3,
+  retry_of_job_id: null,
   result: null,
   failure_message: null,
+  cancel_requested_at: null,
   created_at: "2026-09-18T08:00:00Z",
   started_at: null,
   finished_at: null,
@@ -104,6 +109,30 @@ describe("jobs API client", () => {
     expect(form.get("max_width")).toBe("1200");
     expect(form.get("jpeg_quality")).toBe("90");
     expect(form.getAll("images")).toEqual([image]);
+  });
+
+  it("sends lifecycle actions to their dedicated endpoints", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(job), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await cancelJob(job.id);
+    await retryJob(job.id);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, `/api/v1/jobs/${job.id}/cancel`, {
+      method: "POST",
+      signal: undefined,
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, `/api/v1/jobs/${job.id}/retry`, {
+      method: "POST",
+      signal: undefined,
+    });
   });
 
   it("turns a network failure into a clear availability error", async () => {

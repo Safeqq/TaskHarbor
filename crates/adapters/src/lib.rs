@@ -1,5 +1,6 @@
 mod image_processing;
 mod image_repository;
+mod lifecycle_repository;
 mod postgres;
 mod storage;
 
@@ -10,6 +11,10 @@ pub use image_processing::{
 };
 pub use image_repository::{
     ArtifactKind, ArtifactRecord, JobSettings, NewImageJob, NewInputArtifact, PendingOutputArtifact,
+};
+pub use lifecycle_repository::{
+    AttemptRecord, AttemptStatus, DEFAULT_MAX_ATTEMPTS, FailureDisposition, FailureKind,
+    MAX_ATTEMPTS,
 };
 pub use postgres::{
     ClaimedJob, ClaimedWork, DEMO_DELAY_MS, JobRecord, PgJobRepository, RepositoryError,

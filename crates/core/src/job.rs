@@ -101,8 +101,11 @@ impl Error for JobNameError {}
 pub enum JobStatus {
     Queued,
     Running,
+    RetryWaiting,
+    CancelRequested,
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +151,11 @@ impl JobStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::RetryWaiting => "retry_waiting",
+            Self::CancelRequested => "cancel_requested",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -161,8 +167,11 @@ impl FromStr for JobStatus {
         match value {
             "queued" => Ok(Self::Queued),
             "running" => Ok(Self::Running),
+            "retry_waiting" => Ok(Self::RetryWaiting),
+            "cancel_requested" => Ok(Self::CancelRequested),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(JobStatusParseError),
         }
     }
@@ -287,8 +296,11 @@ mod tests {
     fn parses_persisted_job_statuses() {
         assert_eq!("queued".parse(), Ok(JobStatus::Queued));
         assert_eq!("running".parse(), Ok(JobStatus::Running));
+        assert_eq!("retry_waiting".parse(), Ok(JobStatus::RetryWaiting));
+        assert_eq!("cancel_requested".parse(), Ok(JobStatus::CancelRequested));
         assert_eq!("succeeded".parse(), Ok(JobStatus::Succeeded));
         assert_eq!("failed".parse(), Ok(JobStatus::Failed));
+        assert_eq!("cancelled".parse(), Ok(JobStatus::Cancelled));
         assert_eq!("unknown".parse::<JobStatus>(), Err(JobStatusParseError));
     }
 

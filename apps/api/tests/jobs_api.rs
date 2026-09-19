@@ -87,6 +87,49 @@ async fn serves_persistent_jobs_and_consistent_errors() {
     assert_eq!(detail_status, StatusCode::OK);
     assert_eq!(detail, created);
 
+    let (early_retry_status, early_retry) = send(
+        router.clone(),
+        Request::post(format!("/api/v1/jobs/{job_id}/retry"))
+            .body(Body::empty())
+            .expect("early retry request should be valid"),
+    )
+    .await;
+    assert_eq!(early_retry_status, StatusCode::CONFLICT);
+    assert_eq!(early_retry["error"]["code"], "job_state_conflict");
+
+    let (cancel_status, cancelled) = send(
+        router.clone(),
+        Request::post(format!("/api/v1/jobs/{job_id}/cancel"))
+            .body(Body::empty())
+            .expect("cancel request should be valid"),
+    )
+    .await;
+    assert_eq!(cancel_status, StatusCode::OK);
+    assert_eq!(cancelled["status"], "cancelled");
+    assert!(cancelled["cancel_requested_at"].is_string());
+
+    let (retry_status, retry) = send(
+        router.clone(),
+        Request::post(format!("/api/v1/jobs/{job_id}/retry"))
+            .body(Body::empty())
+            .expect("manual retry request should be valid"),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::CREATED);
+    assert_eq!(retry["status"], "queued");
+    assert_eq!(retry["retry_of_job_id"], job_id);
+    assert_ne!(retry["id"], job_id);
+    assert_eq!(
+        retry["inputs"][0]["filename"],
+        created["inputs"][0]["filename"]
+    );
+    assert_eq!(
+        retry["inputs"][0]["byte_size"],
+        created["inputs"][0]["byte_size"]
+    );
+    assert_ne!(retry["inputs"][0]["id"], created["inputs"][0]["id"]);
+    assert_eq!(retry["attempts"], json!([]));
+
     let (content_type, body) = multipart_job("   ", "picture.png", &png);
     let invalid_request = Request::post("/api/v1/jobs")
         .header(CONTENT_TYPE, content_type)

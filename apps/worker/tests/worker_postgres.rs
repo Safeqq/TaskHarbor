@@ -5,10 +5,11 @@ use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sqlx::PgPool;
 use taskharbor_adapters::{
-    ImageService, LocalStorage, NewImageJob, NewInputArtifact, PgJobRepository,
+    AttemptStatus, ImageService, JobRecord, LocalStorage, NewImageJob, NewInputArtifact,
+    PgJobRepository, RepositoryError,
 };
 use taskharbor_core::{JobName, JobStatus};
-use taskharbor_worker::{process_next, run};
+use taskharbor_worker::{process_claimed, process_next, run};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
@@ -193,6 +194,285 @@ async fn fails_the_whole_job_without_publishing_partial_outputs() {
     assert_eq!(attempt.state, "failed");
     assert_eq!(attempt.progress_completed, 1);
     assert_eq!(attempt.progress_total, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
+async fn transient_failure_retries_and_preserves_attempt_history() {
+    let database_url = env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL must point to an isolated test database");
+    let repository = PgJobRepository::connect(&database_url, 3)
+        .await
+        .expect("test database should be reachable");
+    repository
+        .migrate()
+        .await
+        .expect("migrations should succeed");
+    let setup_pool = PgPool::connect(&database_url)
+        .await
+        .expect("test setup should connect");
+    sqlx::query("TRUNCATE artifacts, job_attempts, jobs RESTART IDENTITY CASCADE")
+        .execute(&setup_pool)
+        .await
+        .expect("test tables should be reset");
+
+    let storage_root = tempfile::tempdir().expect("temporary storage should be created");
+    let storage = LocalStorage::initialize(storage_root.path())
+        .await
+        .expect("temporary storage should initialize");
+    let (job, input_key, source) =
+        create_image_fixture(&repository, &storage, "transient retry").await;
+    let input_path = storage
+        .resolve_key(&input_key)
+        .expect("input key should resolve safely");
+    tokio::fs::remove_file(&input_path)
+        .await
+        .expect("input should be removed to inject a transient I/O failure");
+    let images = ImageService::new(storage.clone(), 1);
+
+    assert!(
+        process_next(&repository, &images, &storage)
+            .await
+            .expect("transient failure should be recorded")
+    );
+    let waiting = repository
+        .get(job.job().id())
+        .await
+        .expect("waiting job should be readable")
+        .expect("waiting job should exist");
+    assert_eq!(waiting.job().status(), JobStatus::RetryWaiting);
+    assert_eq!(waiting.progress_completed(), 0);
+    let first_attempt = waiting
+        .attempts()
+        .next()
+        .expect("first attempt should be preserved");
+    assert_eq!(first_attempt.status(), AttemptStatus::Failed);
+    assert_eq!(first_attempt.error_kind(), Some("transient"));
+
+    tokio::fs::write(&input_path, &source)
+        .await
+        .expect("input should be restored before retry");
+    sqlx::query("UPDATE jobs SET available_at = CURRENT_TIMESTAMP WHERE id = $1")
+        .bind(i64::try_from(job.job().id().get()).expect("job ID should fit BIGINT"))
+        .execute(&setup_pool)
+        .await
+        .expect("retry should be made eligible deterministically");
+
+    assert!(
+        process_next(&repository, &images, &storage)
+            .await
+            .expect("second attempt should run")
+    );
+    let succeeded = repository
+        .get(job.job().id())
+        .await
+        .expect("succeeded job should be readable")
+        .expect("succeeded job should exist");
+    assert_eq!(succeeded.job().status(), JobStatus::Succeeded);
+    let attempts = succeeded.attempts().collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].status(), AttemptStatus::Failed);
+    assert_eq!(attempts[1].status(), AttemptStatus::Succeeded);
+    assert_eq!(succeeded.outputs().count(), 1);
+
+    let (limited, limited_key, _) =
+        create_image_fixture(&repository, &storage, "attempt limit").await;
+    sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE id = $1")
+        .bind(i64::try_from(limited.job().id().get()).expect("job ID should fit BIGINT"))
+        .execute(&setup_pool)
+        .await
+        .expect("attempt limit should be configurable in the fixture");
+    tokio::fs::remove_file(
+        storage
+            .resolve_key(&limited_key)
+            .expect("limited input key should be safe"),
+    )
+    .await
+    .expect("limited input should be removed");
+    assert!(
+        process_next(&repository, &images, &storage)
+            .await
+            .expect("limited transient failure should be recorded")
+    );
+    let exhausted = repository
+        .get(limited.job().id())
+        .await
+        .expect("exhausted job should be readable")
+        .expect("exhausted job should exist");
+    assert_eq!(exhausted.job().status(), JobStatus::Failed);
+    assert_eq!(exhausted.attempts().count(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
+async fn worker_finishes_requested_cancellation_at_a_safe_boundary() {
+    let database_url = env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL must point to an isolated test database");
+    let repository = PgJobRepository::connect(&database_url, 3)
+        .await
+        .expect("test database should be reachable");
+    repository
+        .migrate()
+        .await
+        .expect("migrations should succeed");
+    let setup_pool = PgPool::connect(&database_url)
+        .await
+        .expect("test setup should connect");
+    sqlx::query("TRUNCATE artifacts, job_attempts, jobs RESTART IDENTITY CASCADE")
+        .execute(&setup_pool)
+        .await
+        .expect("test tables should be reset");
+
+    let storage_root = tempfile::tempdir().expect("temporary storage should be created");
+    let storage = LocalStorage::initialize(storage_root.path())
+        .await
+        .expect("temporary storage should initialize");
+    let (job, _, _) = create_image_fixture(&repository, &storage, "cancel boundary").await;
+    let claimed = repository
+        .claim_next()
+        .await
+        .expect("claim should succeed")
+        .expect("job should be claimable");
+    let requested = repository
+        .request_cancel(job.job().id())
+        .await
+        .expect("cancel request should succeed")
+        .expect("job should exist");
+    assert_eq!(requested.job().status(), JobStatus::CancelRequested);
+
+    let images = ImageService::new(storage.clone(), 1);
+    process_claimed(&repository, &images, &storage, claimed)
+        .await
+        .expect("worker should finish cancellation cleanly");
+
+    let cancelled = repository
+        .get(job.job().id())
+        .await
+        .expect("cancelled job should be readable")
+        .expect("cancelled job should exist");
+    assert_eq!(cancelled.job().status(), JobStatus::Cancelled);
+    assert_eq!(cancelled.outputs().count(), 0);
+    let attempt = cancelled
+        .attempts()
+        .next()
+        .expect("cancelled attempt should be preserved");
+    assert_eq!(attempt.status(), AttemptStatus::Cancelled);
+    assert_eq!(attempt.error_kind(), Some("cancelled"));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
+async fn cancel_completion_interleavings_have_one_terminal_winner() {
+    let database_url = env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL must point to an isolated test database");
+    let repository = PgJobRepository::connect(&database_url, 3)
+        .await
+        .expect("test database should be reachable");
+    repository
+        .migrate()
+        .await
+        .expect("migrations should succeed");
+    let setup_pool = PgPool::connect(&database_url)
+        .await
+        .expect("test setup should connect");
+    sqlx::query("TRUNCATE artifacts, job_attempts, jobs RESTART IDENTITY CASCADE")
+        .execute(&setup_pool)
+        .await
+        .expect("test tables should be reset");
+
+    let cancel_wins = repository
+        .create(JobName::new("cancel wins").expect("test name should be valid"))
+        .await
+        .expect("job should be created");
+    let cancel_claim = repository
+        .claim_next()
+        .await
+        .expect("claim should succeed")
+        .expect("job should be claimable");
+    repository
+        .request_cancel(cancel_wins.job().id())
+        .await
+        .expect("cancel request should succeed")
+        .expect("cancelled job should exist");
+    assert!(matches!(
+        repository
+            .complete(&cancel_claim, Duration::from_millis(1))
+            .await,
+        Err(RepositoryError::StateConflict(_))
+    ));
+    repository
+        .finish_cancelled(&cancel_claim, Duration::from_millis(2))
+        .await
+        .expect("cancel winner should finalize");
+
+    let completion_wins = repository
+        .create(JobName::new("completion wins").expect("test name should be valid"))
+        .await
+        .expect("job should be created");
+    let complete_claim = repository
+        .claim_next()
+        .await
+        .expect("claim should succeed")
+        .expect("job should be claimable");
+    repository
+        .complete(&complete_claim, Duration::from_millis(1))
+        .await
+        .expect("completion winner should finalize");
+    assert!(matches!(
+        repository.request_cancel(completion_wins.job().id()).await,
+        Err(RepositoryError::StateConflict(_))
+    ));
+
+    let cancelled = repository
+        .get(cancel_wins.job().id())
+        .await
+        .expect("cancel winner should be readable")
+        .expect("cancel winner should exist");
+    let succeeded = repository
+        .get(completion_wins.job().id())
+        .await
+        .expect("completion winner should be readable")
+        .expect("completion winner should exist");
+    assert_eq!(cancelled.job().status(), JobStatus::Cancelled);
+    assert_eq!(succeeded.job().status(), JobStatus::Succeeded);
+}
+
+async fn create_image_fixture(
+    repository: &PgJobRepository,
+    storage: &LocalStorage,
+    name: &str,
+) -> (JobRecord, String, Vec<u8>) {
+    let batch = storage
+        .begin_upload()
+        .await
+        .expect("upload batch should initialize");
+    let source = test_png();
+    let (storage_key, mut file) = batch
+        .create_file()
+        .await
+        .expect("input file should be created");
+    file.write_all(&source)
+        .await
+        .expect("input file should be written");
+    file.flush().await.expect("input file should flush");
+    drop(file);
+    let job = repository
+        .create_image_job(NewImageJob {
+            name: JobName::new(name).expect("test name should be valid"),
+            max_width: 2,
+            jpeg_quality: 85,
+            inputs: vec![NewInputArtifact {
+                storage_key: storage_key.clone(),
+                display_name: "input.png".into(),
+                media_type: "image/png".into(),
+                byte_size: u64::try_from(source.len()).expect("test PNG size should fit u64"),
+                width: 4,
+                height: 2,
+            }],
+        })
+        .await
+        .expect("image job should be created");
+    (job, storage_key, source)
 }
 
 #[derive(Debug, sqlx::FromRow)]

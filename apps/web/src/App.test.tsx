@@ -7,6 +7,8 @@ import { ApiError, type Job } from "./features/jobs/api";
 const apiMocks = vi.hoisted(() => ({
   listJobs: vi.fn(),
   createImageJob: vi.fn(),
+  cancelJob: vi.fn(),
+  retryJob: vi.fn(),
 }));
 
 vi.mock("./features/jobs/api", async (importOriginal) => {
@@ -15,6 +17,8 @@ vi.mock("./features/jobs/api", async (importOriginal) => {
     ...actual,
     listJobs: apiMocks.listJobs,
     createImageJob: apiMocks.createImageJob,
+    cancelJob: apiMocks.cancelJob,
+    retryJob: apiMocks.retryJob,
   };
 });
 
@@ -44,8 +48,13 @@ const queuedJob: Job = {
     },
   ],
   outputs: [],
+  attempts: [],
+  available_at: "2026-09-18T09:00:00Z",
+  max_attempts: 3,
+  retry_of_job_id: null,
   result: null,
   failure_message: null,
+  cancel_requested_at: null,
   created_at: "2026-09-18T09:00:00Z",
   started_at: null,
   finished_at: null,
@@ -54,6 +63,8 @@ const queuedJob: Job = {
 beforeEach(() => {
   apiMocks.listJobs.mockReset();
   apiMocks.createImageJob.mockReset();
+  apiMocks.cancelJob.mockReset();
+  apiMocks.retryJob.mockReset();
 });
 
 afterEach(() => {
@@ -118,6 +129,25 @@ describe("Jobs dashboard", () => {
       await screen.findByRole("heading", { name: queuedJob.name }),
     ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Job #41 entered the queue");
+  });
+
+  it("requests cancellation and updates the selected job", async () => {
+    const cancelledJob: Job = {
+      ...queuedJob,
+      status: "cancelled",
+      cancel_requested_at: "2026-09-18T09:01:00Z",
+      finished_at: "2026-09-18T09:01:00Z",
+    };
+    apiMocks.listJobs.mockResolvedValueOnce([queuedJob]).mockResolvedValue([cancelledJob]);
+    apiMocks.cancelJob.mockResolvedValue(cancelledJob);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: queuedJob.name });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel job" }));
+
+    expect(apiMocks.cancelJob).toHaveBeenCalledWith(queuedJob.id, expect.any(AbortSignal));
+    expect(await screen.findByRole("button", { name: "Retry as new job" })).toBeInTheDocument();
   });
 
   it("waits for each poll to finish and aborts the active request on unmount", async () => {

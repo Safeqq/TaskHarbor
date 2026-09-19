@@ -1,5 +1,13 @@
-export type JobStatus = "queued" | "running" | "succeeded" | "failed";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "retry_waiting"
+  | "cancel_requested"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 export type JobType = "demo_delay" | "image_resize";
+export type AttemptStatus = "running" | "succeeded" | "failed" | "cancelled";
 
 export interface JobProgress {
   completed: number;
@@ -29,6 +37,18 @@ export interface Artifact {
   download_url: string | null;
 }
 
+export interface JobAttempt {
+  id: number;
+  number: number;
+  status: AttemptStatus;
+  progress: JobProgress;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  error_kind: "transient" | "permanent" | "cancelled" | null;
+  error_message: string | null;
+}
+
 export interface Job {
   id: number;
   name: string;
@@ -39,8 +59,13 @@ export interface Job {
   image_settings: ImageSettings | null;
   inputs: Artifact[];
   outputs: Artifact[];
+  attempts: JobAttempt[];
+  available_at: string;
+  max_attempts: number;
+  retry_of_job_id: number | null;
   result: JobResult | null;
   failure_message: string | null;
+  cancel_requested_at: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -101,6 +126,20 @@ export async function createImageJob(
   return request<Job>("/api/v1/jobs", {
     method: "POST",
     body,
+    signal,
+  });
+}
+
+export async function cancelJob(id: number, signal?: AbortSignal): Promise<Job> {
+  return request<Job>(`/api/v1/jobs/${id}/cancel`, {
+    method: "POST",
+    signal,
+  });
+}
+
+export async function retryJob(id: number, signal?: AbortSignal): Promise<Job> {
+  return request<Job>(`/api/v1/jobs/${id}/retry`, {
+    method: "POST",
     signal,
   });
 }

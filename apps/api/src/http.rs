@@ -4,11 +4,12 @@ use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use taskharbor_adapters::{
-    ArtifactKind, ArtifactRecord, JobRecord, JobSettings, MAX_TOTAL_FILE_BYTES,
+    ArtifactKind, ArtifactRecord, AttemptRecord, AttemptStatus, JobRecord, JobSettings,
+    MAX_TOTAL_FILE_BYTES,
 };
 use taskharbor_core::{JobId, JobStatus, JobType};
 use time::OffsetDateTime;
@@ -25,6 +26,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/{id}", get(get_job))
+        .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
+        .route("/api/v1/jobs/{id}/retry", post(retry_job))
         .route("/api/v1/artifacts/{id}/download", get(download_artifact))
         .layer(DefaultBodyLimit::max(
             usize::try_from(MAX_TOTAL_FILE_BYTES).unwrap_or(25 * 1024 * 1024)
@@ -76,6 +79,42 @@ async fn get_job(
         .ok_or_else(ApiError::job_not_found)?;
 
     Ok(Json(job.into()))
+}
+
+async fn cancel_job(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<JobResponse>, ApiError> {
+    let id = parse_job_id(&raw_id)?;
+    let job = state
+        .jobs
+        .request_cancel(id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(ApiError::job_not_found)?;
+
+    Ok(Json(job.into()))
+}
+
+async fn retry_job(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
+    let id = parse_job_id(&raw_id)?;
+    let job = state
+        .jobs
+        .manual_retry(id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(ApiError::job_not_found)?;
+
+    Ok((StatusCode::CREATED, Json(job.into())))
+}
+
+fn parse_job_id(raw_id: &str) -> Result<JobId, ApiError> {
+    raw_id
+        .parse::<JobId>()
+        .map_err(|_| ApiError::job_not_found())
 }
 
 async fn download_artifact(
@@ -138,8 +177,15 @@ struct JobResponse {
     image_settings: Option<ImageSettingsResponse>,
     inputs: Vec<ArtifactResponse>,
     outputs: Vec<ArtifactResponse>,
+    attempts: Vec<AttemptResponse>,
+    #[serde(with = "time::serde::rfc3339")]
+    available_at: OffsetDateTime,
+    max_attempts: u32,
+    retry_of_job_id: Option<u64>,
     result: Option<JobResultResponse>,
     failure_message: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    cancel_requested_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -172,6 +218,7 @@ impl From<JobRecord> for JobResponse {
         };
         let inputs = record.inputs().map(ArtifactResponse::input).collect();
         let outputs = record.outputs().map(ArtifactResponse::output).collect();
+        let attempts = record.attempts().map(AttemptResponse::from).collect();
 
         Self {
             id: record.job().id().get(),
@@ -186,8 +233,13 @@ impl From<JobRecord> for JobResponse {
             image_settings,
             inputs,
             outputs,
+            attempts,
+            available_at: record.available_at(),
+            max_attempts: record.max_attempts(),
+            retry_of_job_id: record.retry_of_job_id().map(JobId::get),
             result,
             failure_message,
+            cancel_requested_at: record.cancel_requested_at(),
             created_at: record.created_at(),
             started_at: record.started_at(),
             finished_at: record.finished_at(),
@@ -244,6 +296,40 @@ impl ArtifactResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct AttemptResponse {
+    id: i64,
+    number: u32,
+    status: AttemptStatusResponse,
+    progress: ProgressResponse,
+    #[serde(with = "time::serde::rfc3339")]
+    started_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    finished_at: Option<OffsetDateTime>,
+    duration_ms: Option<u64>,
+    error_kind: Option<String>,
+    error_message: Option<String>,
+}
+
+impl From<&AttemptRecord> for AttemptResponse {
+    fn from(attempt: &AttemptRecord) -> Self {
+        Self {
+            id: attempt.id(),
+            number: attempt.attempt_number(),
+            status: attempt.status().into(),
+            progress: ProgressResponse {
+                completed: attempt.progress_completed(),
+                total: attempt.progress_total(),
+            },
+            started_at: attempt.started_at(),
+            finished_at: attempt.finished_at(),
+            duration_ms: attempt.duration_ms(),
+            error_kind: attempt.error_kind().map(str::to_owned),
+            error_message: attempt.error_message().map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct ProgressResponse {
     completed: u32,
     total: u32,
@@ -260,8 +346,20 @@ struct JobResultResponse {
 enum JobStatusResponse {
     Queued,
     Running,
+    RetryWaiting,
+    CancelRequested,
     Succeeded,
     Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AttemptStatusResponse {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Serialize)]
@@ -285,8 +383,22 @@ impl From<JobStatus> for JobStatusResponse {
         match status {
             JobStatus::Queued => Self::Queued,
             JobStatus::Running => Self::Running,
+            JobStatus::RetryWaiting => Self::RetryWaiting,
+            JobStatus::CancelRequested => Self::CancelRequested,
             JobStatus::Succeeded => Self::Succeeded,
             JobStatus::Failed => Self::Failed,
+            JobStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<AttemptStatus> for AttemptStatusResponse {
+    fn from(status: AttemptStatus) -> Self {
+        match status {
+            AttemptStatus::Running => Self::Running,
+            AttemptStatus::Succeeded => Self::Succeeded,
+            AttemptStatus::Failed => Self::Failed,
+            AttemptStatus::Cancelled => Self::Cancelled,
         }
     }
 }

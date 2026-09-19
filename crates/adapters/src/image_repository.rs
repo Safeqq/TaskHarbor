@@ -334,58 +334,6 @@ impl PgJobRepository {
         transaction.commit().await?;
         Ok(())
     }
-
-    pub async fn fail(
-        &self,
-        claimed: &ClaimedJob,
-        duration: Duration,
-        safe_message: &str,
-    ) -> Result<(), RepositoryError> {
-        let duration_ms = encode_duration(duration)?;
-        let job_id = encode_job_id(claimed.job_id())?;
-        let mut transaction = self.pool.begin().await?;
-
-        let attempt = sqlx::query(
-            r#"
-            UPDATE job_attempts
-            SET state = 'failed',
-                finished_at = CURRENT_TIMESTAMP,
-                duration_ms = $3,
-                error_message = $4
-            WHERE id = $1
-              AND job_id = $2
-              AND state = 'running'
-            "#,
-        )
-        .bind(claimed.attempt_id())
-        .bind(job_id)
-        .bind(duration_ms)
-        .bind(safe_message)
-        .execute(&mut *transaction)
-        .await?;
-        ensure_one_row(attempt.rows_affected(), "fail attempt")?;
-
-        let job = sqlx::query(
-            r#"
-            UPDATE jobs
-            SET state = 'failed',
-                failure_message = $2,
-                result_message = NULL,
-                result_duration_ms = NULL,
-                finished_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-              AND state = 'running'
-            "#,
-        )
-        .bind(job_id)
-        .bind(safe_message)
-        .execute(&mut *transaction)
-        .await?;
-        ensure_one_row(job.rows_affected(), "fail job")?;
-
-        transaction.commit().await?;
-        Ok(())
-    }
 }
 
 pub(crate) async fn load_artifacts(

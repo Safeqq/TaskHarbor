@@ -46,5 +46,6 @@ export function formatBytes(value: number): string {
 }
 
 export function statusLabel(status: JobStatus): string {
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  const words = status.split("_").join(" ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }

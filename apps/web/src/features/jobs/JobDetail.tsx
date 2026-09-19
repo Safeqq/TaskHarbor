@@ -1,13 +1,75 @@
-import { artifactDownloadUrl, type Artifact, type Job } from "./api";
+import { useEffect, useRef, useState } from "react";
+
+import {
+  artifactDownloadUrl,
+  cancelJob,
+  errorMessage,
+  isAbortError,
+  retryJob,
+  type Artifact,
+  type Job,
+  type JobAttempt,
+} from "./api";
 import { formatBytes, formatDateTime, formatDuration } from "./format";
 import { JobProgress } from "./JobProgress";
 import { StatusBadge } from "./StatusBadge";
 
 interface JobDetailProps {
   job: Job | null;
+  onUpdated: (job: Job) => void;
+  onRetried: (job: Job) => void;
 }
 
-export function JobDetail({ job }: JobDetailProps) {
+export function JobDetail({ job, onUpdated, onRetried }: JobDetailProps) {
+  const [activeAction, setActiveAction] = useState<"cancel" | "retry" | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    setActionError(null);
+  }, [job?.id]);
+
+  useEffect(
+    () => () => {
+      requestRef.current?.abort();
+    },
+    [],
+  );
+
+  const handleAction = async (action: "cancel" | "retry") => {
+    if (job === null) {
+      return;
+    }
+
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setActiveAction(action);
+    setActionError(null);
+    try {
+      const updated =
+        action === "cancel"
+          ? await cancelJob(job.id, controller.signal)
+          : await retryJob(job.id, controller.signal);
+      if (controller.signal.aborted) {
+        return;
+      }
+      if (action === "cancel") {
+        onUpdated(updated);
+      } else {
+        onRetried(updated);
+      }
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setActionError(errorMessage(error));
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setActiveAction(null);
+      }
+      requestRef.current = null;
+    }
+  };
+
   if (job === null) {
     return (
       <section className="detail-card detail-card--empty" aria-labelledby="job-detail-title">
@@ -33,10 +95,63 @@ export function JobDetail({ job }: JobDetailProps) {
         <StatusBadge status={job.status} />
       </div>
 
+      <div className="detail-actions">
+        <div>
+          {job.status === "retry_waiting" && (
+            <span>Next automatic attempt {formatDateTime(job.available_at)}</span>
+          )}
+          {job.status === "cancel_requested" && (
+            <span>Worker will cancel at the next safe boundary.</span>
+          )}
+        </div>
+        <div>
+          {(job.status === "queued" ||
+            job.status === "retry_waiting" ||
+            job.status === "running") && (
+            <button
+              className="button button--danger"
+              type="button"
+              onClick={() => void handleAction("cancel")}
+              disabled={activeAction !== null}
+            >
+              {activeAction === "cancel" ? "Requesting…" : "Cancel job"}
+            </button>
+          )}
+          {job.status === "cancel_requested" && (
+            <button className="button button--secondary" type="button" disabled>
+              Cancellation requested
+            </button>
+          )}
+          {(job.status === "failed" || job.status === "cancelled") && (
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={() => void handleAction("retry")}
+              disabled={activeAction !== null}
+            >
+              {activeAction === "retry" ? "Creating retry…" : "Retry as new job"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {actionError && (
+        <p className="form-message form-message--error detail-action-error" role="alert">
+          {actionError}
+        </p>
+      )}
+
       <JobProgress progress={job.progress} />
 
       <dl className="detail-grid">
         <DetailItem label="Job type" value={job.job_type} mono />
+        <DetailItem
+          label="Attempts"
+          value={`${job.attempts.length}/${job.max_attempts.toLocaleString()}`}
+        />
+        {job.retry_of_job_id !== null && (
+          <DetailItem label="Manual retry of" value={`Job #${job.retry_of_job_id}`} mono />
+        )}
         {job.image_settings ? (
           <>
             <DetailItem
@@ -54,6 +169,12 @@ export function JobDetail({ job }: JobDetailProps) {
         <DetailItem label="Created" value={formatDateTime(job.created_at)} />
         <DetailItem label="Started" value={formatDateTime(job.started_at)} />
         <DetailItem label="Finished" value={formatDateTime(job.finished_at)} />
+        {job.cancel_requested_at !== null && (
+          <DetailItem
+            label="Cancel requested"
+            value={formatDateTime(job.cancel_requested_at)}
+          />
+        )}
         <DetailItem
           label="Actual duration"
           value={formatDuration(job.result?.duration_ms ?? null)}
@@ -62,11 +183,13 @@ export function JobDetail({ job }: JobDetailProps) {
 
       {job.job_type === "image_resize" && <ImageArtifacts job={job} />}
 
+      <AttemptHistory attempts={job.attempts} maxAttempts={job.max_attempts} />
+
       {job.failure_message && (
         <div className="failure-note" role="alert">
           <FailureIcon />
           <div>
-            <span>Job failed</span>
+            <span>{job.status === "retry_waiting" ? "Attempt failed" : "Job failed"}</span>
             <p>{job.failure_message}</p>
           </div>
         </div>
@@ -119,6 +242,71 @@ function ImageArtifacts({ job }: { job: Job }) {
   );
 }
 
+function AttemptHistory({
+  attempts,
+  maxAttempts,
+}: {
+  attempts: JobAttempt[];
+  maxAttempts: number;
+}) {
+  return (
+    <section className="attempt-section" aria-labelledby="attempt-history-title">
+      <div className="attempt-section__heading">
+        <div>
+          <span className="section-kicker">Execution</span>
+          <h3 id="attempt-history-title">Attempt history</h3>
+        </div>
+        <span>
+          {attempts.length}/{maxAttempts} used
+        </span>
+      </div>
+
+      {attempts.length === 0 ? (
+        <p className="artifact-empty">The worker has not started this job yet.</p>
+      ) : (
+        <ol className="attempt-list">
+          {[...attempts]
+            .sort((left, right) => right.number - left.number)
+            .map((attempt) => (
+              <li key={attempt.id}>
+                <div className="attempt-list__header">
+                  <strong>Attempt {attempt.number}</strong>
+                  <StatusBadge status={attempt.status} />
+                </div>
+                <dl>
+                  <div>
+                    <dt>Started</dt>
+                    <dd>{formatDateTime(attempt.started_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Duration</dt>
+                    <dd>{formatDuration(attempt.duration_ms)}</dd>
+                  </div>
+                  <div>
+                    <dt>Finished</dt>
+                    <dd>{formatDateTime(attempt.finished_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Progress</dt>
+                    <dd>
+                      {attempt.progress.completed}/{attempt.progress.total}
+                    </dd>
+                  </div>
+                </dl>
+                {attempt.error_message && (
+                  <p>
+                    <span>{attempt.error_kind ?? "error"}</span>
+                    {attempt.error_message}
+                  </p>
+                )}
+              </li>
+            ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 interface ArtifactPairProps {
   input: Artifact;
   output: Artifact | null;
@@ -136,7 +324,11 @@ function ArtifactPair({ input, output, jobStatus }: ArtifactPairProps) {
       {output === null ? (
         <div className="artifact-meta artifact-meta--pending">
           <span>Output</span>
-          <p>{jobStatus === "failed" ? "Not published" : "Waiting for worker"}</p>
+          <p>
+            {jobStatus === "failed" || jobStatus === "cancelled"
+              ? "Not published"
+              : "Waiting for worker"}
+          </p>
         </div>
       ) : (
         <ArtifactMeta label="Output" artifact={output} downloadable />
