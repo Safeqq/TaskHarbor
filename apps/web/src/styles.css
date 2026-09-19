@@ -432,6 +432,10 @@ footer {
   line-height: 1.45;
 }
 
+.field-label-spaced {
+  margin-top: 1rem;
+}
+
 .create-card input {
   width: 100%;
   height: 2.9rem;
@@ -466,6 +470,104 @@ footer {
 .create-card input:disabled {
   cursor: wait;
   opacity: 0.68;
+}
+
+.create-card .file-input {
+  height: auto;
+  min-height: 2.9rem;
+  padding: 0.4rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.file-input::file-selector-button {
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
+  margin-right: 0.65rem;
+  cursor: pointer;
+  color: var(--navy);
+  background: #eef4f1;
+  border: 0;
+  border-radius: 0.38rem;
+  font: inherit;
+  font-weight: 750;
+}
+
+.selected-files {
+  margin-top: 0.65rem;
+  overflow: hidden;
+  background: #f8f6ef;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+}
+
+.selected-files__summary,
+.selected-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.selected-files__summary {
+  padding: 0.55rem 0.65rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  font-size: 0.67rem;
+}
+
+.selected-files__summary strong {
+  color: var(--ink);
+}
+
+.selected-files ul {
+  max-height: 7.5rem;
+  padding: 0.25rem 0.65rem;
+  margin: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.selected-files li {
+  padding: 0.3rem 0;
+  color: var(--faint);
+  font-size: 0.67rem;
+}
+
+.selected-files li > span:first-child {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-files li > span:last-child {
+  flex: 0 0 auto;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.settings-grid > div {
+  position: relative;
+}
+
+.settings-grid input {
+  margin-top: 0.45rem;
+  padding-right: 3.2rem;
+}
+
+.settings-grid > div > span {
+  position: absolute;
+  right: 0.65rem;
+  bottom: 0.88rem;
+  color: var(--faint);
+  font-size: 0.62rem;
+  pointer-events: none;
 }
 
 .form-message {
@@ -504,6 +606,7 @@ footer {
 .icon-button:focus-visible,
 .job-row:focus-visible,
 .inline-alert button:focus-visible,
+.download-link:focus-visible,
 .brand:focus-visible {
   outline: 3px solid rgb(42 122 112 / 28%);
   outline-offset: 2px;
@@ -562,6 +665,7 @@ footer {
   border-top: 1px solid var(--line);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.68rem;
+  flex-wrap: wrap;
 }
 
 .jobs-card {
@@ -1030,7 +1134,137 @@ footer {
   font-size: 0.76rem !important;
 }
 
-.result-note {
+.artifact-section {
+  margin-top: 1.25rem;
+}
+
+.artifact-section__heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.artifact-section__heading h3 {
+  margin: 0.25rem 0 0;
+  color: var(--navy-dark);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.05rem;
+}
+
+.artifact-section__heading > span {
+  color: var(--faint);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.artifact-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.artifact-pair {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) minmax(150px, 0.8fr) minmax(170px, 0.9fr);
+  gap: 1px;
+  overflow: hidden;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+}
+
+.artifact-pair__title,
+.artifact-meta {
+  min-width: 0;
+  padding: 0.85rem 0.9rem;
+  background: #fbfaf5;
+}
+
+.artifact-pair__title {
+  display: grid;
+  align-content: center;
+  gap: 0.3rem;
+}
+
+.artifact-pair__title span,
+.artifact-meta > span {
+  color: var(--faint);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.artifact-pair__title strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.77rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-meta p {
+  margin: 0.28rem 0 0;
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.artifact-meta small {
+  display: block;
+  margin-top: 0.22rem;
+  color: var(--faint);
+  font-size: 0.65rem;
+}
+
+.artifact-meta--pending {
+  display: grid;
+  align-content: center;
+}
+
+.artifact-meta--pending p {
+  color: var(--muted);
+  font-weight: 550;
+}
+
+.download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+  color: var(--teal);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.download-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.download-link svg {
+  width: 0.85rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.artifact-empty {
+  padding: 1rem;
+  margin: 0;
+  color: var(--muted);
+  background: #fbfaf5;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  font-size: 0.76rem;
+}
+
+.result-note,
+.failure-note {
   display: flex;
   align-items: flex-start;
   gap: 0.75rem;
@@ -1042,7 +1276,8 @@ footer {
   border-radius: 0.6rem;
 }
 
-.result-note > svg {
+.result-note > svg,
+.failure-note > svg {
   flex: 0 0 auto;
   width: 1.1rem;
   margin-top: 0.1rem;
@@ -1053,16 +1288,24 @@ footer {
   stroke-width: 2;
 }
 
-.result-note span {
+.result-note span,
+.failure-note span {
   font-size: 0.66rem;
   font-weight: 800;
   letter-spacing: 0.07em;
   text-transform: uppercase;
 }
 
-.result-note p {
+.result-note p,
+.failure-note p {
   margin: 0.25rem 0 0;
   font-size: 0.8rem;
+}
+
+.failure-note {
+  color: #7a342f;
+  background: var(--red-soft);
+  border-color: #efc9c3;
 }
 
 .detail-card--empty {
@@ -1145,6 +1388,14 @@ footer {
   .detail-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+
+  .artifact-pair {
+    grid-template-columns: minmax(160px, 1fr) 1fr;
+  }
+
+  .artifact-pair__title {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 560px) {
@@ -1216,6 +1467,21 @@ footer {
 
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .settings-grid,
+  .artifact-pair {
+    grid-template-columns: 1fr;
+  }
+
+  .artifact-pair__title {
+    grid-column: auto;
+  }
+
+  .artifact-section__heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
   }
 
   .detail-card--empty {

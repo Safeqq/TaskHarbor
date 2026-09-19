@@ -6,7 +6,7 @@ import { ApiError, type Job } from "./features/jobs/api";
 
 const apiMocks = vi.hoisted(() => ({
   listJobs: vi.fn(),
-  createJob: vi.fn(),
+  createImageJob: vi.fn(),
 }));
 
 vi.mock("./features/jobs/api", async (importOriginal) => {
@@ -14,18 +14,38 @@ vi.mock("./features/jobs/api", async (importOriginal) => {
   return {
     ...actual,
     listJobs: apiMocks.listJobs,
-    createJob: apiMocks.createJob,
+    createImageJob: apiMocks.createImageJob,
   };
 });
 
 const queuedJob: Job = {
   id: 41,
   name: "Design thumbnails",
-  job_type: "demo_delay",
+  job_type: "image_resize",
   status: "queued",
   progress: { completed: 0, total: 1 },
-  delay_ms: 500,
+  delay_ms: null,
+  image_settings: {
+    max_width: 1600,
+    jpeg_quality: 85,
+    output_media_type: "image/jpeg",
+    transparency_background: "white",
+  },
+  inputs: [
+    {
+      id: 91,
+      item_index: 0,
+      filename: "product.png",
+      media_type: "image/png",
+      byte_size: 4,
+      width: 800,
+      height: 600,
+      download_url: null,
+    },
+  ],
+  outputs: [],
   result: null,
+  failure_message: null,
   created_at: "2026-09-18T09:00:00Z",
   started_at: null,
   finished_at: null,
@@ -33,7 +53,7 @@ const queuedJob: Job = {
 
 beforeEach(() => {
   apiMocks.listJobs.mockReset();
-  apiMocks.createJob.mockReset();
+  apiMocks.createImageJob.mockReset();
 });
 
 afterEach(() => {
@@ -73,7 +93,8 @@ describe("Jobs dashboard", () => {
 
   it("creates a job through the labelled form and selects its detail", async () => {
     apiMocks.listJobs.mockResolvedValueOnce([]).mockResolvedValue([queuedJob]);
-    apiMocks.createJob.mockResolvedValue(queuedJob);
+    apiMocks.createImageJob.mockResolvedValue(queuedJob);
+    const image = new File(["png"], "product.png", { type: "image/png" });
 
     render(<App />);
 
@@ -81,9 +102,18 @@ describe("Jobs dashboard", () => {
     fireEvent.change(screen.getByLabelText("Job name"), {
       target: { value: queuedJob.name },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create job" }));
+    fireEvent.change(screen.getByLabelText("Source images"), {
+      target: { files: [image] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Upload and create" }));
 
-    expect(apiMocks.createJob).toHaveBeenCalledWith(queuedJob.name, expect.any(AbortSignal));
+    expect(apiMocks.createImageJob).toHaveBeenCalledWith(
+      queuedJob.name,
+      [image],
+      1600,
+      85,
+      expect.any(AbortSignal),
+    );
     expect(
       await screen.findByRole("heading", { name: queuedJob.name }),
     ).toBeInTheDocument();

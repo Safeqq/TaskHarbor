@@ -9,8 +9,10 @@ taskharbor-adapters = { path = "../../crates/adapters" }
 tokio.workspace = true
 
 [dev-dependencies]
+image.workspace = true
 sqlx.workspace = true
 taskharbor-core = { path = "../../crates/core" }
+tempfile = "=3.27.0"
 
 [lints]
 workspace = true

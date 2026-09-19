@@ -3,11 +3,12 @@ use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
 
-use taskharbor_adapters::PgJobRepository;
+use taskharbor_adapters::{LocalStorage, PgJobRepository};
 use taskharbor_api::app;
 use tokio::{net::TcpListener, signal};
 
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:3000";
+const DEFAULT_STORAGE_DIR: &str = "var/storage";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -22,10 +23,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = bind_addr.parse::<SocketAddr>()?;
     let jobs = PgJobRepository::connect(&database_url, 5).await?;
     jobs.migrate().await?;
+    let storage_dir =
+        env::var("TASKHARBOR_STORAGE_DIR").unwrap_or_else(|_| DEFAULT_STORAGE_DIR.to_owned());
+    let storage = LocalStorage::initialize(storage_dir).await?;
     let listener = TcpListener::bind(bind_addr).await?;
 
     println!("TaskHarbor API listening on http://{bind_addr}");
-    axum::serve(listener, app(jobs))
+    axum::serve(listener, app(jobs, storage))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

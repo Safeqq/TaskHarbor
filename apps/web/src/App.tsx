@@ -98,10 +98,10 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
               <span aria-hidden="true">/</span>
               <strong>Jobs</strong>
             </div>
-            <h1 id="page-title">Background work, in view.</h1>
+            <h1 id="page-title">Image work, in view.</h1>
             <p>
-              Create a job, follow its progress, and inspect the result from one quiet control
-              surface.
+              Upload source images, follow each item through the worker, and download published
+              JPEG results from one quiet control surface.
             </p>
           </div>
           <div className="sync-card">
@@ -224,7 +224,7 @@ function EmptyJobs() {
         <HarborIcon />
       </span>
       <h3>No jobs in the harbor yet</h3>
-      <p>Create your first demo job with the form. It will appear here immediately.</p>
+      <p>Upload your first image job with the form. It will appear here immediately.</p>
     </div>
   );
 }

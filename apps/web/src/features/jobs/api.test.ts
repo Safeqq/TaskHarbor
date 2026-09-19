@@ -1,15 +1,35 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, createJob, listJobs, type Job } from "./api";
+import { ApiError, createImageJob, listJobs, type Job } from "./api";
 
 const job: Job = {
   id: 12,
   name: "Generate catalog previews",
-  job_type: "demo_delay",
+  job_type: "image_resize",
   status: "queued",
   progress: { completed: 0, total: 1 },
-  delay_ms: 500,
+  delay_ms: null,
+  image_settings: {
+    max_width: 1600,
+    jpeg_quality: 85,
+    output_media_type: "image/jpeg",
+    transparency_background: "white",
+  },
+  inputs: [
+    {
+      id: 31,
+      item_index: 0,
+      filename: "source.png",
+      media_type: "image/png",
+      byte_size: 4,
+      width: 8,
+      height: 4,
+      download_url: null,
+    },
+  ],
+  outputs: [],
   result: null,
+  failure_message: null,
   created_at: "2026-09-18T08:00:00Z",
   started_at: null,
   finished_at: null,
@@ -50,13 +70,40 @@ describe("jobs API client", () => {
       ),
     );
 
-    const request = createJob("   ");
+    const request = createImageJob(
+      "   ",
+      [new File(["png"], "source.png", { type: "image/png" })],
+      1600,
+      85,
+    );
 
     await expect(request).rejects.toMatchObject<Partial<ApiError>>({
       status: 422,
       code: "validation_error",
       field: "name",
     });
+  });
+
+  it("creates a multipart request and leaves the boundary to the browser", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(job), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const image = new File(["png"], "source.png", { type: "image/png" });
+
+    await expect(createImageJob(job.name, [image], 1200, 90)).resolves.toEqual(job);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.headers).toBeUndefined();
+    expect(init.body).toBeInstanceOf(FormData);
+    const form = init.body as FormData;
+    expect(form.get("name")).toBe(job.name);
+    expect(form.get("max_width")).toBe("1200");
+    expect(form.get("jpeg_quality")).toBe("90");
+    expect(form.getAll("images")).toEqual([image]);
   });
 
   it("turns a network failure into a clear availability error", async () => {

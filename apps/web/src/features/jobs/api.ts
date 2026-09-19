@@ -1,4 +1,5 @@
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
+export type JobType = "demo_delay" | "image_resize";
 
 export interface JobProgress {
   completed: number;
@@ -10,14 +11,36 @@ export interface JobResult {
   duration_ms: number | null;
 }
 
+export interface ImageSettings {
+  max_width: number;
+  jpeg_quality: number;
+  output_media_type: "image/jpeg";
+  transparency_background: "white";
+}
+
+export interface Artifact {
+  id: number;
+  item_index: number;
+  filename: string;
+  media_type: "image/jpeg" | "image/png";
+  byte_size: number;
+  width: number;
+  height: number;
+  download_url: string | null;
+}
+
 export interface Job {
   id: number;
   name: string;
-  job_type: "demo_delay";
+  job_type: JobType;
   status: JobStatus;
   progress: JobProgress;
-  delay_ms: number;
+  delay_ms: number | null;
+  image_settings: ImageSettings | null;
+  inputs: Artifact[];
+  outputs: Artifact[];
   result: JobResult | null;
+  failure_message: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -62,13 +85,28 @@ export async function listJobs(signal?: AbortSignal): Promise<Job[]> {
   return response.jobs;
 }
 
-export async function createJob(name: string, signal?: AbortSignal): Promise<Job> {
+export async function createImageJob(
+  name: string,
+  images: File[],
+  maxWidth: number,
+  jpegQuality: number,
+  signal?: AbortSignal,
+): Promise<Job> {
+  const body = new FormData();
+  body.append("name", name);
+  body.append("max_width", maxWidth.toString());
+  body.append("jpeg_quality", jpegQuality.toString());
+  images.forEach((image) => body.append("images", image, image.name));
+
   return request<Job>("/api/v1/jobs", {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
+    body,
     signal,
   });
+}
+
+export function artifactDownloadUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
 }
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {

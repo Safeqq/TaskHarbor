@@ -5,11 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+image.workspace = true
 sqlx.workspace = true
 taskharbor-core = { path = "../core" }
 time.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
+tempfile = "=3.27.0"
 tokio.workspace = true
 
 [lints]

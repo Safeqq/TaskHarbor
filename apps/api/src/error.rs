@@ -2,7 +2,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-use taskharbor_adapters::RepositoryError;
+use taskharbor_adapters::{ImageError, RepositoryError, StorageError};
 use taskharbor_core::JobNameError;
 
 #[derive(Debug)]
@@ -14,21 +14,83 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub fn invalid_json() -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_json",
-            message: "request body must be valid JSON with a string field named 'name'".into(),
-            field: None,
-        }
-    }
-
     pub fn invalid_job_name(error: JobNameError) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "validation_error",
             message: error.to_string(),
             field: Some("name"),
+        }
+    }
+
+    pub fn invalid_multipart(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_multipart",
+            message: message.into(),
+            field: None,
+        }
+    }
+
+    pub fn upload_validation(
+        code: &'static str,
+        message: impl Into<String>,
+        field: &'static str,
+    ) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code,
+            message: message.into(),
+            field: Some(field),
+        }
+    }
+
+    pub fn upload_too_large(
+        code: &'static str,
+        message: impl Into<String>,
+        field: &'static str,
+    ) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code,
+            message: message.into(),
+            field: Some(field),
+        }
+    }
+
+    pub fn storage(_error: StorageError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "storage_error",
+            message: "file storage is temporarily unavailable".into(),
+            field: None,
+        }
+    }
+
+    pub fn image_inspection(_error: ImageError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "image_inspection_error",
+            message: "the uploaded image could not be inspected".into(),
+            field: Some("images"),
+        }
+    }
+
+    pub fn artifact_unavailable(_error: StorageError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "artifact_unavailable",
+            message: "the output file is temporarily unavailable".into(),
+            field: None,
+        }
+    }
+
+    pub fn artifact_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "artifact_not_found",
+            message: "output artifact was not found".into(),
+            field: None,
         }
     }
 

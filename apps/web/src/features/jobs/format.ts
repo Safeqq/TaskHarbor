@@ -28,6 +28,23 @@ export function formatDuration(value: number | null): string {
   return value === null ? "Not recorded" : `${value.toLocaleString()} ms`;
 }
 
+export function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value.toLocaleString()} B`;
+  }
+
+  const units = ["KiB", "MiB", "GiB"];
+  let size = value / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = size >= 10 ? 1 : 2;
+  return `${size.toLocaleString(undefined, { maximumFractionDigits: digits })} ${units[unitIndex]}`;
+}
+
 export function statusLabel(status: JobStatus): string {
   return status.charAt(0).toUpperCase() + status.slice(1);
 }

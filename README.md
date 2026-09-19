@@ -1,18 +1,18 @@
 # TaskHarbor
 
-TaskHarbor is a learning-focused portfolio project for creating, scheduling, running, and monitoring background jobs. The first real job type will resize JPEG and PNG images through a Rust API and a separate Rust worker.
+TaskHarbor is a learning-focused portfolio project for creating, running, and monitoring background jobs. Its first real job type resizes JPEG and PNG images through a Rust API and a separate Rust worker.
 
 ## Current milestone
 
-Phase 3 adds a React and TypeScript dashboard to the persistent job pipeline. The dashboard creates `demo_delay` jobs, polls their state every two seconds, and shows progress, timestamps, and worker results without a manual refresh.
+Phase 4 adds a complete `image_resize` pipeline. The dashboard uploads up to ten JPEG or PNG inputs, the API validates their actual content and metadata, and the worker publishes downloadable JPEG outputs with per-item progress.
 
 The current request flow is:
 
-1. React submits the labelled create form through the frontend API client.
-2. Vite proxies the development request to Axum, which validates the job name.
-3. PostgreSQL assigns an ID and saves a queued job.
-4. The worker claims one eligible job in a short transaction, releases the row lock, waits asynchronously, and records completion in a new transaction.
-5. Sequential polling reads the new state and updates the list and selected job detail.
+1. React sends multipart form data with the job settings and source images.
+2. Axum streams each file to a server-generated storage key while enforcing count and byte limits.
+3. Image headers are inspected to verify JPEG or PNG content, dimensions, megapixels, and the absence of PNG animation before PostgreSQL records the queued job.
+4. The worker claims the job, runs bounded image work outside Tokio's async threads, preserves aspect ratio without upscaling, and flattens transparency onto white.
+5. PostgreSQL publishes the complete output manifest only after every item succeeds. The dashboard polls progress and exposes the resulting JPEG downloads.
 
 Jobs survive API and worker restarts. Crash recovery is intentionally deferred: if the worker dies after a claim, that job remains `running` until it is reset manually in the local demo database.
 
@@ -22,7 +22,7 @@ Jobs survive API and worker restarts. Crash recovery is intentionally deferred: 
 apps/api/          HTTP transport and API executable
 apps/worker/       Job execution loop and worker executable
 apps/web/          React dashboard, API client, polling, and UI tests
-crates/adapters/   PostgreSQL repository and atomic queue claim
+crates/adapters/   PostgreSQL, local storage, and image processing adapters
 crates/core/       Domain types and validation rules
 migrations/        Append-only PostgreSQL schema changes
 deploy/            Local PostgreSQL Compose configuration
@@ -73,7 +73,7 @@ npm run dev --prefix apps/web
 
 Open `http://127.0.0.1:5173`. The Vite development server proxies `/api` and `/health` to the API at `http://127.0.0.1:3000`, so no browser CORS configuration is needed for local development.
 
-Both executables apply pending migrations before doing other work. The API listens on `127.0.0.1:3000` by default; `TASKHARBOR_BIND_ADDR` can override it.
+Both executables apply pending migrations before doing other work. They share `TASKHARBOR_STORAGE_DIR`, which defaults to `var/storage`. The worker bounds CPU-heavy image tasks with `TASKHARBOR_MAX_BLOCKING_TASKS`, which defaults to `2`. The API listens on `127.0.0.1:3000`; `TASKHARBOR_BIND_ADDR` can override it.
 
 ```text
 TaskHarbor API listening on http://127.0.0.1:3000
@@ -87,19 +87,23 @@ TaskHarbor API listening on http://127.0.0.1:3000
 | `POST` | `/api/v1/jobs` | Create a queued job |
 | `GET` | `/api/v1/jobs` | List jobs by ascending ID |
 | `GET` | `/api/v1/jobs/{id}` | Read one job or return `404` |
+| `GET` | `/api/v1/artifacts/{id}/download` | Download a published JPEG output |
 
 Create a job:
 
 ```bash
 curl -i -X POST http://127.0.0.1:3000/api/v1/jobs \
-  -H "content-type: application/json" \
-  -d '{"name":"resize avatars"}'
+  -F "name=resize avatars" \
+  -F "max_width=1600" \
+  -F "jpeg_quality=85" \
+  -F "images=@avatar.png" \
+  -F "images=@portrait.jpg"
 ```
 
 Windows PowerShell passes quotes to native programs differently. This equivalent command was verified on Windows:
 
 ```powershell
-curl.exe --request POST --header "content-type: application/json" --data '{\"name\":\"resize-avatars\"}' http://127.0.0.1:3000/api/v1/jobs
+curl.exe --request POST --form "name=resize avatars" --form "max_width=1600" --form "jpeg_quality=85" --form "images=@avatar.png" http://127.0.0.1:3000/api/v1/jobs
 ```
 
 List and read jobs while the worker changes their state from `queued` to `running` and then `succeeded`:
@@ -114,9 +118,9 @@ Validation and parsing errors use a consistent envelope:
 ```json
 {
   "error": {
-    "code": "validation_error",
-    "message": "job name must contain at least one non-whitespace character",
-    "field": "name"
+    "code": "invalid_image",
+    "message": "file content is not a supported JPEG or PNG image",
+    "field": "images"
   }
 }
 ```
@@ -137,7 +141,8 @@ Database integration tests use the isolated test database and are opt-in:
 ```powershell
 $env:TEST_DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:5432/taskharbor_test"
 cargo test -p taskharbor-adapters --locked -- --ignored --test-threads=1
-cargo test -p taskharbor-api --test jobs_api --locked -- --ignored --test-threads=1
+cargo test -p taskharbor-api --tests --locked -- --ignored --test-threads=1
+cargo test -p taskharbor-worker --tests --locked -- --ignored --test-threads=1
 ```
 
 Project progress and verified commands are recorded in `docs/progress.md`.

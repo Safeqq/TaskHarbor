@@ -5,8 +5,12 @@ use std::time::Duration;
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
-use taskharbor_core::{Job, JobId, JobName, JobStatus};
+use taskharbor_core::{Job, JobId, JobName, JobStatus, JobType};
 use time::OffsetDateTime;
+
+use crate::image_repository::{
+    ArtifactKind, ArtifactRecord, JobSettings, load_artifacts, load_input_artifacts,
+};
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
@@ -15,7 +19,7 @@ const RESULT_MESSAGE: &str = "demo delay completed";
 
 #[derive(Debug, Clone)]
 pub struct PgJobRepository {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl PgJobRepository {
@@ -52,12 +56,16 @@ impl PgJobRepository {
             RETURNING
                 id,
                 name,
+                job_type,
                 state,
                 progress_completed,
                 progress_total,
                 delay_ms,
+                max_width,
+                jpeg_quality,
                 result_message,
                 result_duration_ms,
+                failure_message,
                 created_at,
                 started_at,
                 finished_at
@@ -68,7 +76,7 @@ impl PgJobRepository {
         .fetch_one(&self.pool)
         .await?;
 
-        row.try_into()
+        row.try_into_record(Vec::new())
     }
 
     pub async fn list(&self) -> Result<Vec<JobRecord>, RepositoryError> {
@@ -77,12 +85,16 @@ impl PgJobRepository {
             SELECT
                 id,
                 name,
+                job_type,
                 state,
                 progress_completed,
                 progress_total,
                 delay_ms,
+                max_width,
+                jpeg_quality,
                 result_message,
                 result_duration_ms,
+                failure_message,
                 created_at,
                 started_at,
                 finished_at
@@ -93,7 +105,12 @@ impl PgJobRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(TryInto::try_into).collect()
+        let mut jobs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let artifacts = load_artifacts(&self.pool, row.id).await?;
+            jobs.push(row.try_into_record(artifacts)?);
+        }
+        Ok(jobs)
     }
 
     pub async fn get(&self, id: JobId) -> Result<Option<JobRecord>, RepositoryError> {
@@ -102,12 +119,16 @@ impl PgJobRepository {
             SELECT
                 id,
                 name,
+                job_type,
                 state,
                 progress_completed,
                 progress_total,
                 delay_ms,
+                max_width,
+                jpeg_quality,
                 result_message,
                 result_duration_ms,
+                failure_message,
                 created_at,
                 started_at,
                 finished_at
@@ -119,14 +140,24 @@ impl PgJobRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        row.map(TryInto::try_into).transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let artifacts = load_artifacts(&self.pool, row.id).await?;
+        Ok(Some(row.try_into_record(artifacts)?))
     }
 
     pub async fn claim_next(&self) -> Result<Option<ClaimedJob>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let candidate = sqlx::query_as::<_, ClaimRow>(
             r#"
-            SELECT id, delay_ms
+            SELECT
+                id,
+                job_type,
+                delay_ms,
+                max_width,
+                jpeg_quality,
+                progress_total
             FROM jobs
             WHERE state = 'queued'
               AND available_at <= CURRENT_TIMESTAMP
@@ -143,7 +174,10 @@ impl PgJobRepository {
             return Ok(None);
         };
         let job_id = decode_job_id(candidate.id)?;
-        let delay = decode_duration(candidate.delay_ms)?;
+        let job_type = candidate
+            .job_type
+            .parse::<JobType>()
+            .map_err(|error| RepositoryError::InvalidData(error.to_string()))?;
 
         let attempt_number = sqlx::query_scalar::<_, i32>(
             r#"
@@ -164,6 +198,7 @@ impl PgJobRepository {
                 progress_completed = 0,
                 result_message = NULL,
                 result_duration_ms = NULL,
+                failure_message = NULL,
                 finished_at = NULL
             WHERE id = $1
               AND state = 'queued'
@@ -176,22 +211,53 @@ impl PgJobRepository {
 
         let attempt_id = sqlx::query_scalar::<_, i64>(
             r#"
-            INSERT INTO job_attempts (job_id, attempt_number, state)
-            VALUES ($1, $2, 'running')
+            INSERT INTO job_attempts (job_id, attempt_number, state, progress_total)
+            VALUES ($1, $2, 'running', $3)
             RETURNING id
             "#,
         )
         .bind(candidate.id)
         .bind(attempt_number)
+        .bind(candidate.progress_total)
         .fetch_one(&mut *transaction)
         .await?;
+
+        let work = match job_type {
+            JobType::DemoDelay => ClaimedWork::DemoDelay {
+                delay: decode_duration(candidate.delay_ms)?,
+            },
+            JobType::ImageResize => {
+                let max_width = candidate.max_width.ok_or_else(|| {
+                    RepositoryError::InvalidData("image job has no max width".into())
+                })?;
+                let jpeg_quality = candidate.jpeg_quality.ok_or_else(|| {
+                    RepositoryError::InvalidData("image job has no JPEG quality".into())
+                })?;
+                let inputs = load_input_artifacts(&mut transaction, candidate.id).await?;
+                let expected = usize::try_from(candidate.progress_total).map_err(|_| {
+                    RepositoryError::InvalidData("image progress total is negative".into())
+                })?;
+                if inputs.len() != expected {
+                    return Err(RepositoryError::InvalidData(
+                        "image input count does not match progress total".into(),
+                    ));
+                }
+
+                ClaimedWork::ImageResize {
+                    max_width: decode_u32(max_width, "max_width")?,
+                    jpeg_quality: u8::try_from(jpeg_quality)
+                        .map_err(|_| RepositoryError::InvalidData("invalid JPEG quality".into()))?,
+                    inputs,
+                }
+            }
+        };
 
         transaction.commit().await?;
 
         Ok(Some(ClaimedJob {
             job_id,
             attempt_id,
-            delay,
+            work,
         }))
     }
 
@@ -200,6 +266,11 @@ impl PgJobRepository {
         claimed: &ClaimedJob,
         duration: Duration,
     ) -> Result<(), RepositoryError> {
+        if !matches!(&claimed.work, ClaimedWork::DemoDelay { .. }) {
+            return Err(RepositoryError::InvalidData(
+                "image job cannot use demo completion".into(),
+            ));
+        }
         let duration_ms = i64::try_from(duration.as_millis()).map_err(|_| {
             RepositoryError::InvalidData("worker duration exceeds BIGINT range".into())
         })?;
@@ -232,9 +303,11 @@ impl PgJobRepository {
                 progress_completed = progress_total,
                 result_message = $2,
                 result_duration_ms = $3,
+                failure_message = NULL,
                 finished_at = CURRENT_TIMESTAMP
             WHERE id = $1
               AND state = 'running'
+              AND job_type = 'demo_delay'
             "#,
         )
         .bind(job_id)
@@ -252,11 +325,13 @@ impl PgJobRepository {
 #[derive(Debug, Clone)]
 pub struct JobRecord {
     job: Job,
+    settings: JobSettings,
     progress_completed: u32,
     progress_total: u32,
-    delay_ms: u64,
     result_message: Option<String>,
     result_duration_ms: Option<u64>,
+    failure_message: Option<String>,
+    artifacts: Vec<ArtifactRecord>,
     created_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     finished_at: Option<OffsetDateTime>,
@@ -267,6 +342,10 @@ impl JobRecord {
         &self.job
     }
 
+    pub const fn settings(&self) -> &JobSettings {
+        &self.settings
+    }
+
     pub const fn progress_completed(&self) -> u32 {
         self.progress_completed
     }
@@ -275,16 +354,28 @@ impl JobRecord {
         self.progress_total
     }
 
-    pub const fn delay_ms(&self) -> u64 {
-        self.delay_ms
-    }
-
     pub fn result_message(&self) -> Option<&str> {
         self.result_message.as_deref()
     }
 
     pub const fn result_duration_ms(&self) -> Option<u64> {
         self.result_duration_ms
+    }
+
+    pub fn failure_message(&self) -> Option<&str> {
+        self.failure_message.as_deref()
+    }
+
+    pub fn inputs(&self) -> impl Iterator<Item = &ArtifactRecord> {
+        self.artifacts
+            .iter()
+            .filter(|artifact| artifact.kind() == ArtifactKind::Input)
+    }
+
+    pub fn outputs(&self) -> impl Iterator<Item = &ArtifactRecord> {
+        self.artifacts
+            .iter()
+            .filter(|artifact| artifact.kind() == ArtifactKind::Output)
     }
 
     pub const fn created_at(&self) -> OffsetDateTime {
@@ -304,7 +395,7 @@ impl JobRecord {
 pub struct ClaimedJob {
     job_id: JobId,
     attempt_id: i64,
-    delay: Duration,
+    work: ClaimedWork,
 }
 
 impl ClaimedJob {
@@ -316,9 +407,21 @@ impl ClaimedJob {
         self.attempt_id
     }
 
-    pub const fn delay(&self) -> Duration {
-        self.delay
+    pub const fn work(&self) -> &ClaimedWork {
+        &self.work
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ClaimedWork {
+    DemoDelay {
+        delay: Duration,
+    },
+    ImageResize {
+        max_width: u32,
+        jpeg_quality: u8,
+        inputs: Vec<ArtifactRecord>,
+    },
 }
 
 #[derive(Debug)]
@@ -370,30 +473,36 @@ impl From<MigrateError> for RepositoryError {
 struct JobRow {
     id: i64,
     name: String,
+    job_type: String,
     state: String,
     progress_completed: i32,
     progress_total: i32,
     delay_ms: i32,
+    max_width: Option<i32>,
+    jpeg_quality: Option<i16>,
     result_message: Option<String>,
     result_duration_ms: Option<i64>,
+    failure_message: Option<String>,
     created_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     finished_at: Option<OffsetDateTime>,
 }
 
-impl TryFrom<JobRow> for JobRecord {
-    type Error = RepositoryError;
-
-    fn try_from(row: JobRow) -> Result<Self, Self::Error> {
-        let id = decode_job_id(row.id)?;
-        let name = JobName::new(row.name)
+impl JobRow {
+    fn try_into_record(self, artifacts: Vec<ArtifactRecord>) -> Result<JobRecord, RepositoryError> {
+        let id = decode_job_id(self.id)?;
+        let name = JobName::new(self.name)
             .map_err(|error| RepositoryError::InvalidData(error.to_string()))?;
-        let status = row
+        let job_type = self
+            .job_type
+            .parse::<JobType>()
+            .map_err(|error| RepositoryError::InvalidData(error.to_string()))?;
+        let status = self
             .state
             .parse::<JobStatus>()
             .map_err(|error| RepositoryError::InvalidData(error.to_string()))?;
-        let progress_completed = decode_u32(row.progress_completed, "progress_completed")?;
-        let progress_total = decode_u32(row.progress_total, "progress_total")?;
+        let progress_completed = decode_u32(self.progress_completed, "progress_completed")?;
+        let progress_total = decode_u32(self.progress_total, "progress_total")?;
 
         if progress_total == 0 || progress_completed > progress_total {
             return Err(RepositoryError::InvalidData(
@@ -401,19 +510,39 @@ impl TryFrom<JobRow> for JobRecord {
             ));
         }
 
-        Ok(Self {
-            job: Job::restore(id, name, status),
+        let settings = match job_type {
+            JobType::DemoDelay => JobSettings::DemoDelay {
+                delay_ms: decode_u64(i64::from(self.delay_ms), "delay_ms")?,
+            },
+            JobType::ImageResize => JobSettings::ImageResize {
+                max_width: decode_u32(
+                    self.max_width.ok_or_else(|| {
+                        RepositoryError::InvalidData("image job has no max width".into())
+                    })?,
+                    "max_width",
+                )?,
+                jpeg_quality: u8::try_from(self.jpeg_quality.ok_or_else(|| {
+                    RepositoryError::InvalidData("image job has no JPEG quality".into())
+                })?)
+                .map_err(|_| RepositoryError::InvalidData("invalid JPEG quality".into()))?,
+            },
+        };
+
+        Ok(JobRecord {
+            job: Job::restore(id, name, job_type, status),
+            settings,
             progress_completed,
             progress_total,
-            delay_ms: decode_u64(i64::from(row.delay_ms), "delay_ms")?,
-            result_message: row.result_message,
-            result_duration_ms: row
+            result_message: self.result_message,
+            result_duration_ms: self
                 .result_duration_ms
                 .map(|value| decode_u64(value, "result_duration_ms"))
                 .transpose()?,
-            created_at: row.created_at,
-            started_at: row.started_at,
-            finished_at: row.finished_at,
+            failure_message: self.failure_message,
+            artifacts,
+            created_at: self.created_at,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
         })
     }
 }
@@ -421,15 +550,19 @@ impl TryFrom<JobRow> for JobRecord {
 #[derive(Debug, FromRow)]
 struct ClaimRow {
     id: i64,
+    job_type: String,
     delay_ms: i32,
+    max_width: Option<i32>,
+    jpeg_quality: Option<i16>,
+    progress_total: i32,
 }
 
-fn decode_job_id(value: i64) -> Result<JobId, RepositoryError> {
+pub(crate) fn decode_job_id(value: i64) -> Result<JobId, RepositoryError> {
     let value = decode_u64(value, "job ID")?;
     JobId::new(value).map_err(|error| RepositoryError::InvalidData(error.to_string()))
 }
 
-fn encode_job_id(id: JobId) -> Result<i64, RepositoryError> {
+pub(crate) fn encode_job_id(id: JobId) -> Result<i64, RepositoryError> {
     i64::try_from(id.get())
         .map_err(|_| RepositoryError::InvalidData("job ID exceeds BIGINT range".into()))
 }
@@ -441,17 +574,20 @@ fn decode_duration(value: i32) -> Result<Duration, RepositoryError> {
     )?))
 }
 
-fn decode_u32(value: i32, field: &str) -> Result<u32, RepositoryError> {
+pub(crate) fn decode_u32(value: i32, field: &str) -> Result<u32, RepositoryError> {
     u32::try_from(value)
         .map_err(|_| RepositoryError::InvalidData(format!("{field} cannot be negative")))
 }
 
-fn decode_u64(value: i64, field: &str) -> Result<u64, RepositoryError> {
+pub(crate) fn decode_u64(value: i64, field: &str) -> Result<u64, RepositoryError> {
     u64::try_from(value)
         .map_err(|_| RepositoryError::InvalidData(format!("{field} cannot be negative")))
 }
 
-fn ensure_one_row(rows_affected: u64, operation: &'static str) -> Result<(), RepositoryError> {
+pub(crate) fn ensure_one_row(
+    rows_affected: u64,
+    operation: &'static str,
+) -> Result<(), RepositoryError> {
     if rows_affected == 1 {
         Ok(())
     } else {

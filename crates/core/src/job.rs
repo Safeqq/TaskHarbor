@@ -105,6 +105,44 @@ pub enum JobStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobType {
+    DemoDelay,
+    ImageResize,
+}
+
+impl JobType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DemoDelay => "demo_delay",
+            Self::ImageResize => "image_resize",
+        }
+    }
+}
+
+impl FromStr for JobType {
+    type Err = JobTypeParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "demo_delay" => Ok(Self::DemoDelay),
+            "image_resize" => Ok(Self::ImageResize),
+            _ => Err(JobTypeParseError),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobTypeParseError;
+
+impl Display for JobTypeParseError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "job type is not recognized")
+    }
+}
+
+impl Error for JobTypeParseError {}
+
 impl JobStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -145,14 +183,16 @@ impl Error for JobStatusParseError {}
 pub struct Job {
     id: JobId,
     name: JobName,
+    job_type: JobType,
     status: JobStatus,
 }
 
 impl Job {
-    pub const fn new_queued(id: JobId, name: JobName) -> Self {
+    pub const fn new_queued(id: JobId, name: JobName, job_type: JobType) -> Self {
         Self {
             id,
             name,
+            job_type,
             status: JobStatus::Queued,
         }
     }
@@ -165,8 +205,17 @@ impl Job {
         self.status
     }
 
-    pub const fn restore(id: JobId, name: JobName, status: JobStatus) -> Self {
-        Self { id, name, status }
+    pub const fn job_type(&self) -> JobType {
+        self.job_type
+    }
+
+    pub const fn restore(id: JobId, name: JobName, job_type: JobType, status: JobStatus) -> Self {
+        Self {
+            id,
+            name,
+            job_type,
+            status,
+        }
     }
 
     pub fn name(&self) -> &JobName {
@@ -177,8 +226,8 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::{
-        Job, JobId, JobIdError, JobName, JobNameError, JobStatus, JobStatusParseError,
-        MAX_JOB_NAME_LENGTH,
+        Job, JobId, JobIdError, JobName, JobNameError, JobStatus, JobStatusParseError, JobType,
+        JobTypeParseError, MAX_JOB_NAME_LENGTH,
     };
 
     #[test]
@@ -227,9 +276,10 @@ mod tests {
         let id = JobId::new(1).expect("test ID should be valid");
         let name = JobName::new("resize profile images").expect("test name should be valid");
 
-        let job = Job::new_queued(id, name);
+        let job = Job::new_queued(id, name, JobType::DemoDelay);
 
         assert_eq!(job.id(), id);
+        assert_eq!(job.job_type(), JobType::DemoDelay);
         assert_eq!(job.status(), JobStatus::Queued);
     }
 
@@ -240,5 +290,12 @@ mod tests {
         assert_eq!("succeeded".parse(), Ok(JobStatus::Succeeded));
         assert_eq!("failed".parse(), Ok(JobStatus::Failed));
         assert_eq!("unknown".parse::<JobStatus>(), Err(JobStatusParseError));
+    }
+
+    #[test]
+    fn parses_supported_job_types() {
+        assert_eq!("demo_delay".parse(), Ok(JobType::DemoDelay));
+        assert_eq!("image_resize".parse(), Ok(JobType::ImageResize));
+        assert_eq!("unknown".parse::<JobType>(), Err(JobTypeParseError));
     }
 }
