@@ -29,7 +29,7 @@ async fn uploads_processes_and_downloads_a_real_image() {
         .await
         .expect("test setup should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
         .execute(&setup_pool)
         .await

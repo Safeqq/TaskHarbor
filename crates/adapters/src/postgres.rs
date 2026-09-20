@@ -7,11 +7,13 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
 use taskharbor_core::{Job, JobId, JobName, JobPriority, JobStatus, JobType, ScheduleId};
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::image_repository::{
     ArtifactKind, ArtifactRecord, JobSettings, load_artifacts, load_input_artifacts,
 };
 use crate::lifecycle_repository::{AttemptRecord, MAX_ATTEMPTS, load_attempts};
+use crate::worker_repository::WorkerId;
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
@@ -171,22 +173,32 @@ impl PgJobRepository {
         Ok(Some(row.try_into_record(artifacts, attempts)?))
     }
 
-    pub async fn claim_next(&self) -> Result<Option<ClaimedJob>, RepositoryError> {
-        self.claim_next_with_time(None).await
+    pub async fn claim_next(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<Option<ClaimedJob>, RepositoryError> {
+        self.claim_next_with_time(worker_id, None).await
     }
 
     pub async fn claim_next_at(
         &self,
+        worker_id: WorkerId,
         as_of: OffsetDateTime,
     ) -> Result<Option<ClaimedJob>, RepositoryError> {
-        self.claim_next_with_time(Some(as_of)).await
+        self.claim_next_with_time(worker_id, Some(as_of)).await
     }
 
     async fn claim_next_with_time(
         &self,
+        worker_id: WorkerId,
         as_of: Option<OffsetDateTime>,
     ) -> Result<Option<ClaimedJob>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        let claim_time =
+            sqlx::query_scalar::<_, OffsetDateTime>("SELECT COALESCE($1, CURRENT_TIMESTAMP)")
+                .bind(as_of)
+                .fetch_one(&mut *transaction)
+                .await?;
         let candidate = sqlx::query_as::<_, ClaimRow>(
             r#"
             SELECT
@@ -199,7 +211,7 @@ impl PgJobRepository {
                 max_attempts
             FROM jobs
             WHERE state IN ('queued', 'retry_waiting')
-              AND available_at <= COALESCE($1, CURRENT_TIMESTAMP)
+              AND available_at <= $1
             ORDER BY
                 CASE priority
                     WHEN 'high' THEN 0
@@ -212,7 +224,7 @@ impl PgJobRepository {
             LIMIT 1
             "#,
         )
-        .bind(as_of)
+        .bind(claim_time)
         .fetch_optional(&mut *transaction)
         .await?;
 
@@ -246,7 +258,7 @@ impl PgJobRepository {
             r#"
             UPDATE jobs
             SET state = 'running',
-                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                started_at = COALESCE(started_at, $2),
                 progress_completed = 0,
                 result_message = NULL,
                 result_duration_ms = NULL,
@@ -257,22 +269,51 @@ impl PgJobRepository {
             "#,
         )
         .bind(candidate.id)
+        .bind(claim_time)
         .execute(&mut *transaction)
         .await?;
         ensure_one_row(updated.rows_affected(), "claim job")?;
 
-        let attempt_id = sqlx::query_scalar::<_, i64>(
+        let claim_token = Uuid::new_v4();
+        let attempt = sqlx::query_as::<_, (i64, OffsetDateTime)>(
             r#"
-            INSERT INTO job_attempts (job_id, attempt_number, state, progress_total)
-            VALUES ($1, $2, 'running', $3)
-            RETURNING id
+            INSERT INTO job_attempts (
+                job_id,
+                attempt_number,
+                state,
+                progress_total,
+                started_at,
+                worker_id,
+                claim_token,
+                lease_expires_at
+            )
+            SELECT
+                $1,
+                $2,
+                'running',
+                $3,
+                $4,
+                worker.id,
+                $6,
+                $4 + (worker.lease_duration_seconds * INTERVAL '1 second')
+            FROM workers AS worker
+            WHERE worker.id = $5
+              AND worker.stopped_at IS NULL
+              AND worker.heartbeat_expires_at > $4
+            RETURNING id, lease_expires_at
             "#,
         )
         .bind(candidate.id)
         .bind(attempt_number)
         .bind(candidate.progress_total)
-        .fetch_one(&mut *transaction)
-        .await?;
+        .bind(claim_time)
+        .bind(worker_id.as_uuid())
+        .bind(claim_token)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RepositoryError::StateConflict(
+            "claim job for inactive worker",
+        ))?;
 
         let work = match job_type {
             JobType::DemoDelay => ClaimedWork::DemoDelay {
@@ -308,9 +349,12 @@ impl PgJobRepository {
 
         Ok(Some(ClaimedJob {
             job_id,
-            attempt_id,
+            attempt_id: attempt.0,
             attempt_number: decode_u32(attempt_number, "attempt number")?,
             max_attempts: decode_u32(candidate.max_attempts, "max attempts")?,
+            worker_id,
+            claim_token,
+            lease_expires_at: attempt.1,
             work,
         }))
     }
@@ -341,14 +385,19 @@ impl PgJobRepository {
             WHERE id = $1
               AND job_id = $3
               AND state = 'running'
+              AND worker_id = $4
+              AND claim_token = $5
+              AND lease_expires_at > CURRENT_TIMESTAMP
             "#,
         )
         .bind(claimed.attempt_id)
         .bind(duration_ms)
         .bind(job_id)
+        .bind(claimed.worker_id.as_uuid())
+        .bind(claimed.claim_token)
         .execute(&mut *transaction)
         .await?;
-        ensure_one_row(attempt.rows_affected(), "complete attempt")?;
+        ensure_claim_row(attempt.rows_affected())?;
 
         let job = sqlx::query(
             r#"
@@ -491,6 +540,9 @@ pub struct ClaimedJob {
     attempt_id: i64,
     attempt_number: u32,
     max_attempts: u32,
+    worker_id: WorkerId,
+    claim_token: Uuid,
+    lease_expires_at: OffsetDateTime,
     work: ClaimedWork,
 }
 
@@ -509,6 +561,18 @@ impl ClaimedJob {
 
     pub const fn max_attempts(&self) -> u32 {
         self.max_attempts
+    }
+
+    pub const fn worker_id(&self) -> WorkerId {
+        self.worker_id
+    }
+
+    pub const fn claim_token(&self) -> Uuid {
+        self.claim_token
+    }
+
+    pub const fn lease_expires_at(&self) -> OffsetDateTime {
+        self.lease_expires_at
     }
 
     pub const fn work(&self) -> &ClaimedWork {
@@ -534,6 +598,7 @@ pub enum RepositoryError {
     Migration(MigrateError),
     InvalidData(String),
     StateConflict(&'static str),
+    ClaimLost,
 }
 
 impl Display for RepositoryError {
@@ -547,6 +612,7 @@ impl Display for RepositoryError {
             Self::StateConflict(operation) => {
                 write!(formatter, "job state changed while trying to {operation}")
             }
+            Self::ClaimLost => write!(formatter, "worker no longer owns this job attempt"),
         }
     }
 }
@@ -556,7 +622,7 @@ impl Error for RepositoryError {
         match self {
             Self::Database(error) => Some(error),
             Self::Migration(error) => Some(error),
-            Self::InvalidData(_) | Self::StateConflict(_) => None,
+            Self::InvalidData(_) | Self::StateConflict(_) | Self::ClaimLost => None,
         }
     }
 }
@@ -745,6 +811,14 @@ pub(crate) fn ensure_one_row(
     }
 }
 
+pub(crate) fn ensure_claim_row(rows_affected: u64) -> Result<(), RepositoryError> {
+    if rows_affected == 1 {
+        Ok(())
+    } else {
+        Err(RepositoryError::ClaimLost)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -754,6 +828,7 @@ mod tests {
     use taskharbor_core::{JobName, JobStatus};
 
     use super::PgJobRepository;
+    use crate::worker_repository::{WorkerId, WorkerRegistration};
 
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
@@ -768,11 +843,22 @@ mod tests {
             .await
             .expect("migrations should succeed");
         sqlx::query(
-            "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+            "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
         )
             .execute(&repository.pool)
             .await
             .expect("test tables should be reset");
+        let worker_id = WorkerId::new();
+        repository
+            .register_worker(&WorkerRegistration {
+                id: worker_id,
+                name: "repository-test-worker".into(),
+                concurrency_limit: 1,
+                lease_duration: Duration::from_secs(30),
+                heartbeat_ttl: Duration::from_secs(30),
+            })
+            .await
+            .expect("test worker should register");
 
         let first = repository
             .create(JobName::new("first job").expect("test name should be valid"))
@@ -795,7 +881,7 @@ mod tests {
         );
 
         let claimed_first = repository
-            .claim_next()
+            .claim_next(worker_id)
             .await
             .expect("claim should succeed")
             .expect("the first job should be claimable");
@@ -830,7 +916,7 @@ mod tests {
         assert_eq!(attempt.duration_ms, Some(12));
 
         let claimed_second = repository
-            .claim_next()
+            .claim_next(worker_id)
             .await
             .expect("second claim should succeed")
             .expect("the second job should be claimable");
@@ -841,7 +927,7 @@ mod tests {
             .expect("second job should complete");
 
         reconnected.pool.close().await;
-        assert!(reconnected.claim_next().await.is_err());
+        assert!(reconnected.claim_next(worker_id).await.is_err());
     }
 
     #[derive(Debug, FromRow)]

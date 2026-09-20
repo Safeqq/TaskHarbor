@@ -120,7 +120,7 @@ impl ApiError {
                 message: "the database is temporarily unavailable".into(),
                 field: None,
             },
-            RepositoryError::StateConflict(_) => Self {
+            RepositoryError::StateConflict(_) | RepositoryError::ClaimLost => Self {
                 status: StatusCode::CONFLICT,
                 code: "job_state_conflict",
                 message: "the job is no longer in a state that allows this action".into(),

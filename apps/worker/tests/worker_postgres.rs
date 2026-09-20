@@ -6,7 +6,7 @@ use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sqlx::PgPool;
 use taskharbor_adapters::{
     AttemptStatus, ImageService, JobRecord, LocalStorage, NewImageJob, NewInputArtifact,
-    PgJobRepository, RepositoryError,
+    PgJobRepository, RepositoryError, WorkerId, WorkerRegistration,
 };
 use taskharbor_core::{JobName, JobPriority, JobStatus};
 use taskharbor_worker::{process_claimed, process_next, run};
@@ -30,7 +30,7 @@ async fn finishes_the_active_job_before_graceful_shutdown() {
         .await
         .expect("test setup should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
         .execute(&setup_pool)
         .await
@@ -108,7 +108,7 @@ async fn fails_the_whole_job_without_publishing_partial_outputs() {
         .await
         .expect("test setup should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
         .execute(&setup_pool)
         .await
@@ -218,7 +218,7 @@ async fn transient_failure_retries_and_preserves_attempt_history() {
         .await
         .expect("test setup should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
         .execute(&setup_pool)
         .await
@@ -327,7 +327,7 @@ async fn worker_finishes_requested_cancellation_at_a_safe_boundary() {
         .await
         .expect("test setup should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
         .execute(&setup_pool)
         .await
@@ -338,8 +338,9 @@ async fn worker_finishes_requested_cancellation_at_a_safe_boundary() {
         .await
         .expect("temporary storage should initialize");
     let (job, _, _) = create_image_fixture(&repository, &storage, "cancel boundary").await;
+    let worker_id = register_test_worker(&repository, "cancel-worker").await;
     let claimed = repository
-        .claim_next()
+        .claim_next(worker_id)
         .await
         .expect("claim should succeed")
         .expect("job should be claimable");
@@ -386,7 +387,7 @@ async fn cancel_completion_interleavings_have_one_terminal_winner() {
         .await
         .expect("test setup should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
         .execute(&setup_pool)
         .await
@@ -396,8 +397,9 @@ async fn cancel_completion_interleavings_have_one_terminal_winner() {
         .create(JobName::new("cancel wins").expect("test name should be valid"))
         .await
         .expect("job should be created");
+    let worker_id = register_test_worker(&repository, "race-worker").await;
     let cancel_claim = repository
-        .claim_next()
+        .claim_next(worker_id)
         .await
         .expect("claim should succeed")
         .expect("job should be claimable");
@@ -422,7 +424,7 @@ async fn cancel_completion_interleavings_have_one_terminal_winner() {
         .await
         .expect("job should be created");
     let complete_claim = repository
-        .claim_next()
+        .claim_next(worker_id)
         .await
         .expect("claim should succeed")
         .expect("job should be claimable");
@@ -487,6 +489,21 @@ async fn create_image_fixture(
         .await
         .expect("image job should be created");
     (job, storage_key, source)
+}
+
+async fn register_test_worker(repository: &PgJobRepository, name: &str) -> WorkerId {
+    let worker_id = WorkerId::new();
+    repository
+        .register_worker(&WorkerRegistration {
+            id: worker_id,
+            name: name.into(),
+            concurrency_limit: 1,
+            lease_duration: Duration::from_secs(30),
+            heartbeat_ttl: Duration::from_secs(30),
+        })
+        .await
+        .expect("test worker should register");
+    worker_id
 }
 
 #[derive(Debug, sqlx::FromRow)]

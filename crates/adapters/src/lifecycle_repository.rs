@@ -3,11 +3,13 @@ use std::time::Duration;
 use sqlx::{FromRow, PgPool};
 use taskharbor_core::JobId;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::postgres::{
     ClaimedJob, JobRecord, PgJobRepository, RepositoryError, decode_job_id, decode_u32, decode_u64,
-    encode_job_id, ensure_one_row,
+    encode_job_id, ensure_claim_row, ensure_one_row,
 };
+use crate::worker_repository::WorkerId;
 
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 pub const MAX_ATTEMPTS: u32 = 10;
@@ -60,6 +62,9 @@ pub struct AttemptRecord {
     duration_ms: Option<u64>,
     error_kind: Option<String>,
     error_message: Option<String>,
+    worker_id: Option<WorkerId>,
+    worker_name: Option<String>,
+    lease_expires_at: Option<OffsetDateTime>,
 }
 
 impl AttemptRecord {
@@ -102,6 +107,18 @@ impl AttemptRecord {
     pub fn error_message(&self) -> Option<&str> {
         self.error_message.as_deref()
     }
+
+    pub const fn worker_id(&self) -> Option<WorkerId> {
+        self.worker_id
+    }
+
+    pub fn worker_name(&self) -> Option<&str> {
+        self.worker_name.as_deref()
+    }
+
+    pub const fn lease_expires_at(&self) -> Option<OffsetDateTime> {
+        self.lease_expires_at
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,17 +141,22 @@ impl PgJobRepository {
                AND attempt.id = $2
             WHERE job.id = $1
               AND attempt.state = 'running'
+              AND attempt.worker_id = $3
+              AND attempt.claim_token = $4
+              AND attempt.lease_expires_at > CURRENT_TIMESTAMP
             "#,
         )
         .bind(encode_job_id(claimed.job_id())?)
         .bind(claimed.attempt_id())
+        .bind(claimed.worker_id().as_uuid())
+        .bind(claimed.claim_token())
         .fetch_optional(&self.pool)
         .await?;
 
         match state.as_deref() {
             Some("running") => Ok(false),
             Some("cancel_requested") => Ok(true),
-            _ => Err(RepositoryError::StateConflict("check job cancellation")),
+            _ => Err(RepositoryError::ClaimLost),
         }
     }
 
@@ -158,15 +180,20 @@ impl PgJobRepository {
             WHERE id = $1
               AND job_id = $2
               AND state = 'running'
+              AND worker_id = $5
+              AND claim_token = $6
+              AND lease_expires_at > CURRENT_TIMESTAMP
             "#,
         )
         .bind(claimed.attempt_id())
         .bind(job_id)
         .bind(duration_ms)
         .bind(CANCELLED_MESSAGE)
+        .bind(claimed.worker_id().as_uuid())
+        .bind(claimed.claim_token())
         .execute(&mut *transaction)
         .await?;
-        ensure_one_row(attempt.rows_affected(), "cancel attempt")?;
+        ensure_claim_row(attempt.rows_affected())?;
 
         let job = sqlx::query(
             r#"
@@ -211,6 +238,9 @@ impl PgJobRepository {
             WHERE id = $1
               AND job_id = $2
               AND state = 'running'
+              AND worker_id = $6
+              AND claim_token = $7
+              AND lease_expires_at > CURRENT_TIMESTAMP
             "#,
         )
         .bind(claimed.attempt_id())
@@ -218,9 +248,11 @@ impl PgJobRepository {
         .bind(duration_ms)
         .bind(kind.as_str())
         .bind(safe_message)
+        .bind(claimed.worker_id().as_uuid())
+        .bind(claimed.claim_token())
         .execute(&mut *transaction)
         .await?;
-        ensure_one_row(attempt.rows_affected(), "fail attempt")?;
+        ensure_claim_row(attempt.rows_affected())?;
 
         let can_retry =
             kind == FailureKind::Transient && claimed.attempt_number() < claimed.max_attempts();
@@ -418,19 +450,23 @@ pub(crate) async fn load_attempts(
     sqlx::query_as::<_, AttemptRow>(
         r#"
         SELECT
-            id,
-            attempt_number,
-            state,
-            progress_completed,
-            progress_total,
-            started_at,
-            finished_at,
-            duration_ms,
-            error_kind,
-            error_message
-        FROM job_attempts
-        WHERE job_id = $1
-        ORDER BY attempt_number
+            attempt.id,
+            attempt.attempt_number,
+            attempt.state,
+            attempt.progress_completed,
+            attempt.progress_total,
+            attempt.started_at,
+            attempt.finished_at,
+            attempt.duration_ms,
+            attempt.error_kind,
+            attempt.error_message,
+            attempt.worker_id,
+            worker.name AS worker_name,
+            attempt.lease_expires_at
+        FROM job_attempts AS attempt
+        LEFT JOIN workers AS worker ON worker.id = attempt.worker_id
+        WHERE attempt.job_id = $1
+        ORDER BY attempt.attempt_number
         "#,
     )
     .bind(job_id)
@@ -441,7 +477,7 @@ pub(crate) async fn load_attempts(
     .collect()
 }
 
-fn retry_backoff_seconds(attempt_number: u32) -> u32 {
+pub(crate) fn retry_backoff_seconds(attempt_number: u32) -> u32 {
     let shift = attempt_number.saturating_sub(1).min(31);
     1_u32
         .checked_shl(shift)
@@ -466,6 +502,9 @@ struct AttemptRow {
     duration_ms: Option<i64>,
     error_kind: Option<String>,
     error_message: Option<String>,
+    worker_id: Option<Uuid>,
+    worker_name: Option<String>,
+    lease_expires_at: Option<OffsetDateTime>,
 }
 
 impl TryFrom<AttemptRow> for AttemptRecord {
@@ -505,6 +544,9 @@ impl TryFrom<AttemptRow> for AttemptRecord {
                 .transpose()?,
             error_kind: row.error_kind,
             error_message: row.error_message,
+            worker_id: row.worker_id.map(WorkerId::from_uuid),
+            worker_name: row.worker_name,
+            lease_expires_at: row.lease_expires_at,
         })
     }
 }

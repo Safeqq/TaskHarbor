@@ -11,7 +11,7 @@ use taskharbor_adapters::{
     ArtifactKind, ArtifactRecord, AttemptRecord, AttemptStatus, JobRecord, JobSettings,
     MAX_OUTPUT_WIDTH, MAX_SCHEDULE_INTERVAL_SECONDS, MAX_TOTAL_FILE_BYTES,
     MIN_SCHEDULE_INTERVAL_SECONDS, ScheduleInputRecord, ScheduleOccurrenceRecord, ScheduleRecord,
-    UpdateSchedule,
+    UpdateSchedule, WorkerRecord,
 };
 use taskharbor_core::{JobId, JobName, JobPriority, JobStatus, JobType, ScheduleId};
 use time::OffsetDateTime;
@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/jobs/{id}", get(get_job))
         .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{id}/retry", post(retry_job))
+        .route("/api/v1/workers", get(list_workers))
         .route(
             "/api/v1/schedules",
             get(list_schedules).post(create_schedule),
@@ -143,6 +144,20 @@ async fn list_schedules(
     Ok(Json(ListSchedulesResponse { schedules }))
 }
 
+async fn list_workers(
+    State(state): State<AppState>,
+) -> Result<Json<ListWorkersResponse>, ApiError> {
+    let workers = state
+        .jobs
+        .list_workers()
+        .await
+        .map_err(ApiError::repository)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(Json(ListWorkersResponse { workers }))
+}
+
 async fn get_schedule(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
@@ -237,6 +252,46 @@ struct ListJobsResponse {
 #[derive(Debug, Serialize)]
 struct ListSchedulesResponse {
     schedules: Vec<ScheduleResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListWorkersResponse {
+    workers: Vec<WorkerResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkerResponse {
+    id: String,
+    name: String,
+    status: &'static str,
+    concurrency_limit: u16,
+    lease_duration_seconds: u32,
+    active_attempts: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    started_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    last_heartbeat_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    heartbeat_expires_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    stopped_at: Option<OffsetDateTime>,
+}
+
+impl From<WorkerRecord> for WorkerResponse {
+    fn from(record: WorkerRecord) -> Self {
+        Self {
+            id: record.id().to_string(),
+            name: record.name().to_owned(),
+            status: record.status().as_str(),
+            concurrency_limit: record.concurrency_limit(),
+            lease_duration_seconds: record.lease_duration_seconds(),
+            active_attempts: record.active_attempts(),
+            started_at: record.started_at(),
+            last_heartbeat_at: record.last_heartbeat_at(),
+            heartbeat_expires_at: record.heartbeat_expires_at(),
+            stopped_at: record.stopped_at(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -546,6 +601,15 @@ struct AttemptResponse {
     duration_ms: Option<u64>,
     error_kind: Option<String>,
     error_message: Option<String>,
+    worker: Option<AttemptWorkerResponse>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    lease_expires_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttemptWorkerResponse {
+    id: String,
+    name: String,
 }
 
 impl From<&AttemptRecord> for AttemptResponse {
@@ -563,6 +627,11 @@ impl From<&AttemptRecord> for AttemptResponse {
             duration_ms: attempt.duration_ms(),
             error_kind: attempt.error_kind().map(str::to_owned),
             error_message: attempt.error_message().map(str::to_owned),
+            worker: attempt.worker_id().map(|worker_id| AttemptWorkerResponse {
+                id: worker_id.to_string(),
+                name: attempt.worker_name().unwrap_or("unknown worker").to_owned(),
+            }),
+            lease_expires_at: attempt.lease_expires_at(),
         }
     }
 }

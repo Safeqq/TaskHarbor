@@ -49,6 +49,8 @@ export interface JobAttempt {
   duration_ms: number | null;
   error_kind: "transient" | "permanent" | "cancelled" | null;
   error_message: string | null;
+  worker: { id: string; name: string } | null;
+  lease_expires_at: string | null;
 }
 
 export interface Job {

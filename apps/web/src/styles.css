@@ -1750,6 +1750,212 @@ footer {
   font-weight: 700;
 }
 
+.workers-hero p {
+  max-width: 42rem;
+}
+
+.worker-overview {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin-bottom: 1.25rem;
+  overflow: hidden;
+  background: var(--navy);
+  border-radius: 0.85rem;
+  box-shadow: var(--shadow);
+}
+
+.worker-overview article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 5rem;
+  padding: 1rem 1.25rem;
+  color: rgb(255 255 255 / 72%);
+}
+
+.worker-overview article + article {
+  border-left: 1px solid rgb(255 255 255 / 13%);
+}
+
+.worker-overview span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-overview strong {
+  color: white;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.8rem;
+}
+
+.workers-card {
+  overflow: hidden;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 0.85rem;
+  box-shadow: var(--shadow);
+}
+
+.worker-state {
+  padding: 2rem 1.4rem;
+  margin: 0;
+  color: var(--muted);
+}
+
+.worker-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1.25rem;
+  border-top: 1px solid var(--line);
+}
+
+.worker-card {
+  padding: 1.15rem;
+  background: #fbfaf5;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+}
+
+.worker-card__header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.worker-card__header > div {
+  display: grid;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.worker-card__header strong {
+  overflow: hidden;
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worker-card__header > div > span {
+  color: var(--faint);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.65rem;
+}
+
+.worker-card__icon {
+  display: grid;
+  width: 2.35rem;
+  height: 2.35rem;
+  place-items: center;
+  color: white;
+  background: var(--teal);
+  border-radius: 0.58rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 700;
+}
+
+.worker-status {
+  padding: 0.32rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-status--online {
+  color: #256459;
+  background: var(--green-soft);
+}
+
+.worker-status--offline {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.worker-status--stopped {
+  color: var(--muted);
+  background: #e9e7df;
+}
+
+.worker-capacity {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.38rem;
+  margin: 1.15rem 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.worker-capacity > strong {
+  color: var(--ink);
+}
+
+.worker-capacity > div {
+  grid-column: 1 / -1;
+  height: 0.34rem;
+  overflow: hidden;
+  background: #e4e2d9;
+  border-radius: 999px;
+}
+
+.worker-capacity > div > span {
+  display: block;
+  height: 100%;
+  background: var(--orange);
+  border-radius: inherit;
+}
+
+.worker-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 0;
+}
+
+.worker-card dl > div {
+  min-width: 0;
+}
+
+.worker-card dt {
+  margin-bottom: 0.2rem;
+  color: var(--faint);
+  font-size: 0.61rem;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.worker-card dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lease-note {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1rem;
+  padding: 1rem 1.2rem;
+  margin-top: 1rem;
+  color: #6c542d;
+  background: var(--amber-soft);
+  border: 1px solid #e6d4b5;
+  border-radius: 0.7rem;
+  font-size: 0.75rem;
+}
+
+.lease-note p {
+  margin: 0;
+  color: #796b51;
+}
+
 footer {
   display: flex;
   align-items: center;
@@ -1808,6 +2014,10 @@ footer {
     grid-template-columns: 1fr;
   }
 
+  .worker-grid {
+    grid-template-columns: 1fr;
+  }
+
   .schedule-edit-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -1858,6 +2068,15 @@ footer {
 
   .status-overview {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .worker-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .worker-overview article + article {
+    border-top: 1px solid rgb(255 255 255 / 13%);
+    border-left: 0;
   }
 
   .status-stat__label {
@@ -1950,6 +2169,15 @@ footer {
 
   .attempt-list dl {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .worker-grid {
+    padding: 0.85rem;
+  }
+
+  .worker-card dl,
+  .lease-note {
+    grid-template-columns: 1fr;
   }
 
   .detail-card--empty {

@@ -4,6 +4,7 @@ mod lifecycle_repository;
 mod postgres;
 mod schedule_repository;
 mod storage;
+mod worker_repository;
 
 pub use image_processing::{
     DEFAULT_JPEG_QUALITY, DEFAULT_OUTPUT_WIDTH, ImageError, ImageMetadata, ImageService,
@@ -26,3 +27,7 @@ pub use schedule_repository::{
     UpdateSchedule,
 };
 pub use storage::{LocalStorage, StorageError, UploadBatch};
+pub use worker_repository::{
+    MAX_LEASE_DURATION, MAX_WORKER_CONCURRENCY, MIN_LEASE_DURATION, MIN_WORKER_CONCURRENCY,
+    ReclaimDisposition, ReclaimedAttempt, WorkerId, WorkerRecord, WorkerRegistration, WorkerStatus,
+};

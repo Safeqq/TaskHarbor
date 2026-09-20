@@ -3,7 +3,7 @@ use std::time::Duration as StdDuration;
 
 use taskharbor_adapters::{
     JobSettings, NewImageJob, NewInputArtifact, NewSchedule, PgJobRepository,
-    ScheduleOccurrenceOutcome, UpdateSchedule,
+    ScheduleOccurrenceOutcome, UpdateSchedule, WorkerId, WorkerRegistration,
 };
 use taskharbor_core::{JobName, JobPriority, JobStatus};
 use time::{Duration, OffsetDateTime};
@@ -24,7 +24,7 @@ async fn scheduling_is_anchored_prioritized_idempotent_and_overlap_safe() {
         .await
         .expect("test pool should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
     .execute(&pool)
     .await
@@ -32,6 +32,20 @@ async fn scheduling_is_anchored_prioritized_idempotent_and_overlap_safe() {
 
     let base =
         OffsetDateTime::from_unix_timestamp(1_900_000_000).expect("test timestamp should be valid");
+    let worker_id = WorkerId::new();
+    repository
+        .register_worker_at(
+            &WorkerRegistration {
+                id: worker_id,
+                name: "schedule-test-worker".into(),
+                concurrency_limit: 1,
+                lease_duration: StdDuration::from_secs(3_600),
+                heartbeat_ttl: StdDuration::from_secs(3_600),
+            },
+            base,
+        )
+        .await
+        .expect("test worker should register");
     let low = create_job(&repository, "low due", base, JobPriority::Low).await;
     let high = create_job(&repository, "high due", base, JobPriority::High).await;
     let future = create_job(
@@ -43,7 +57,7 @@ async fn scheduling_is_anchored_prioritized_idempotent_and_overlap_safe() {
     .await;
 
     let claimed_high = repository
-        .claim_next_at(base)
+        .claim_next_at(worker_id, base)
         .await
         .expect("priority claim should succeed")
         .expect("high priority job should be due");
@@ -51,7 +65,7 @@ async fn scheduling_is_anchored_prioritized_idempotent_and_overlap_safe() {
     cancel_claimed(&repository, &claimed_high).await;
 
     let claimed_low = repository
-        .claim_next_at(base)
+        .claim_next_at(worker_id, base)
         .await
         .expect("second claim should succeed")
         .expect("low priority job should remain claimable");
@@ -59,13 +73,21 @@ async fn scheduling_is_anchored_prioritized_idempotent_and_overlap_safe() {
     cancel_claimed(&repository, &claimed_low).await;
     assert!(
         repository
-            .claim_next_at(base + Duration::minutes(59))
+            .claim_next_at(worker_id, base + Duration::minutes(59))
             .await
             .expect("early claim check should succeed")
             .is_none()
     );
+    repository
+        .heartbeat_worker_at(
+            worker_id,
+            StdDuration::from_secs(3_600),
+            base + Duration::hours(1),
+        )
+        .await
+        .expect("test worker heartbeat should renew");
     let claimed_future = repository
-        .claim_next_at(base + Duration::hours(1))
+        .claim_next_at(worker_id, base + Duration::hours(1))
         .await
         .expect("boundary claim should succeed")
         .expect("job should become eligible exactly at available_at");

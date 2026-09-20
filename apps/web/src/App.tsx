@@ -14,6 +14,7 @@ import {
   useJobs,
 } from "./features/jobs/useJobs";
 import { SchedulesPage } from "./features/schedules/SchedulesPage";
+import { WorkersPage } from "./features/workers/WorkersPage";
 
 interface AppProps {
   pollIntervalMs?: number;
@@ -41,7 +42,7 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
     upsertJob,
   } = useJobs(pollIntervalMs);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [activeView, setActiveView] = useState<"jobs" | "schedules">("jobs");
+  const [activeView, setActiveView] = useState<"jobs" | "schedules" | "workers">("jobs");
 
   useEffect(() => {
     if (selectedId === null && jobs.length > 0) {
@@ -98,7 +99,7 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">
-        Skip to jobs
+        Skip to content
       </a>
 
       <header className="topbar">
@@ -124,6 +125,13 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
             onClick={() => setActiveView("schedules")}
           >
             Schedules
+          </button>
+          <button
+            type="button"
+            className={activeView === "workers" ? "topbar__nav-button topbar__nav-button--active" : "topbar__nav-button"}
+            onClick={() => setActiveView("workers")}
+          >
+            Workers
           </button>
         </nav>
         <div className="topbar__context">
@@ -219,7 +227,7 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
 
         <JobDetail job={selectedJob} onUpdated={handleUpdated} onRetried={handleCreated} />
       </main>
-      ) : (
+      ) : activeView === "schedules" ? (
         <SchedulesPage
           pollIntervalMs={pollIntervalMs}
           onOpenJob={(id) => {
@@ -228,6 +236,8 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
             refresh();
           }}
         />
+      ) : (
+        <WorkersPage pollIntervalMs={pollIntervalMs} />
       )}
 
       <footer>

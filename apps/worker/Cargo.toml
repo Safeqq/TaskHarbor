@@ -13,6 +13,7 @@ image.workspace = true
 sqlx.workspace = true
 taskharbor-core = { path = "../../crates/core" }
 tempfile = "=3.27.0"
+time.workspace = true
 
 [lints]
 workspace = true

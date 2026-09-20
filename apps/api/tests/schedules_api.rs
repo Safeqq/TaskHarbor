@@ -8,7 +8,9 @@ use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use taskharbor_adapters::{ImageService, LocalStorage, PgJobRepository};
+use taskharbor_adapters::{
+    ImageService, LocalStorage, PgJobRepository, WorkerId, WorkerRegistration,
+};
 use taskharbor_api::app;
 use taskharbor_worker::process_claimed;
 use time::Duration;
@@ -28,7 +30,7 @@ async fn serves_one_off_and_recurring_schedule_contracts() {
         .await
         .expect("test setup should connect");
     sqlx::query(
-        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules, workers RESTART IDENTITY CASCADE",
     )
     .execute(&pool)
     .await
@@ -39,6 +41,20 @@ async fn serves_one_off_and_recurring_schedule_contracts() {
         .expect("database time should be readable")
         + Duration::minutes(10);
     let base_text = base.format(&Rfc3339).expect("test time should format");
+    let worker_id = WorkerId::new();
+    repository
+        .register_worker_at(
+            &WorkerRegistration {
+                id: worker_id,
+                name: "api-schedule-worker".into(),
+                concurrency_limit: 1,
+                lease_duration: StdDuration::from_secs(3_600),
+                heartbeat_ttl: StdDuration::from_secs(3_600),
+            },
+            base - Duration::minutes(1),
+        )
+        .await
+        .expect("test worker should register");
 
     let temporary = tempfile::tempdir().expect("temporary storage should be created");
     let storage = LocalStorage::initialize(temporary.path())
@@ -65,13 +81,13 @@ async fn serves_one_off_and_recurring_schedule_contracts() {
     assert_eq!(one_off["available_at"], base_text);
     assert!(
         repository
-            .claim_next_at(base - Duration::nanoseconds(1))
+            .claim_next_at(worker_id, base - Duration::nanoseconds(1))
             .await
             .expect("early eligibility check should succeed")
             .is_none()
     );
     let claimed = repository
-        .claim_next_at(base)
+        .claim_next_at(worker_id, base)
         .await
         .expect("boundary eligibility check should succeed")
         .expect("one-off job should be eligible at its timestamp");
@@ -168,7 +184,7 @@ async fn serves_one_off_and_recurring_schedule_contracts() {
         .expect("due schedule should create an occurrence");
     let job_id = tick.job_id().expect("occurrence should create a job");
     let claimed = repository
-        .claim_next_at(base)
+        .claim_next_at(worker_id, base)
         .await
         .expect("occurrence claim should succeed")
         .expect("occurrence job should be eligible");

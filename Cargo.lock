@@ -1348,6 +1348,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1414,6 +1415,7 @@ dependencies = [
  "thiserror",
  "time",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1449,6 +1451,7 @@ dependencies = [
  "thiserror",
  "time",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -1475,6 +1478,7 @@ dependencies = [
  "time",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1578,6 +1582,7 @@ dependencies = [
  "taskharbor-adapters",
  "taskharbor-core",
  "tempfile",
+ "time",
  "tokio",
 ]
 

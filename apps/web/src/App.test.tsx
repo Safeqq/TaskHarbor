@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { ApiError, type Job } from "./features/jobs/api";
 import type { Schedule } from "./features/schedules/api";
+import type { Worker } from "./features/workers/api";
 
 const apiMocks = vi.hoisted(() => ({
   listJobs: vi.fn(),
@@ -16,6 +17,10 @@ const scheduleMocks = vi.hoisted(() => ({
   listSchedules: vi.fn(),
   createSchedule: vi.fn(),
   updateSchedule: vi.fn(),
+}));
+
+const workerMocks = vi.hoisted(() => ({
+  listWorkers: vi.fn(),
 }));
 
 vi.mock("./features/jobs/api", async (importOriginal) => {
@@ -37,6 +42,11 @@ vi.mock("./features/schedules/api", async (importOriginal) => {
     createSchedule: scheduleMocks.createSchedule,
     updateSchedule: scheduleMocks.updateSchedule,
   };
+});
+
+vi.mock("./features/workers/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./features/workers/api")>();
+  return { ...actual, listWorkers: workerMocks.listWorkers };
 });
 
 const queuedJob: Job = {
@@ -111,6 +121,19 @@ const recurringSchedule: Schedule = {
   updated_at: "2026-09-19T08:00:00Z",
 };
 
+const onlineWorker: Worker = {
+  id: "11111111-1111-4111-8111-111111111111",
+  name: "worker-a",
+  status: "online",
+  concurrency_limit: 2,
+  lease_duration_seconds: 15,
+  active_attempts: 1,
+  started_at: "2026-09-20T01:00:00Z",
+  last_heartbeat_at: "2026-09-20T01:01:00Z",
+  heartbeat_expires_at: "2026-09-20T01:01:10Z",
+  stopped_at: null,
+};
+
 beforeEach(() => {
   apiMocks.listJobs.mockReset();
   apiMocks.createImageJob.mockReset();
@@ -119,6 +142,7 @@ beforeEach(() => {
   scheduleMocks.listSchedules.mockReset();
   scheduleMocks.createSchedule.mockReset();
   scheduleMocks.updateSchedule.mockReset();
+  workerMocks.listWorkers.mockReset();
 });
 
 afterEach(() => {
@@ -226,6 +250,19 @@ describe("Jobs dashboard", () => {
     expect(await screen.findByRole("heading", { name: recurringSchedule.name })).toBeInTheDocument();
     expect(screen.getByText("Occurrence history")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Job #41/ })).toBeInTheDocument();
+  });
+
+  it("opens the workers page and shows heartbeat-based capacity", async () => {
+    apiMocks.listJobs.mockResolvedValue([queuedJob]);
+    workerMocks.listWorkers.mockResolvedValue([onlineWorker]);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Workers" }));
+
+    expect(await screen.findByRole("heading", { name: "Workers, visible." })).toBeInTheDocument();
+    expect(screen.getByText(onlineWorker.name)).toBeInTheDocument();
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.getByText("online")).toBeInTheDocument();
   });
 
   it("waits for each poll to finish and aborts the active request on unmount", async () => {

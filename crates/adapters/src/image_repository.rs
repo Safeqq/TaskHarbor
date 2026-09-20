@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use crate::image_processing::{MAX_FILES_PER_JOB, MAX_OUTPUT_WIDTH};
 use crate::postgres::{
     ClaimedJob, ClaimedWork, JobRecord, PgJobRepository, RepositoryError, decode_job_id,
-    decode_u32, decode_u64, encode_job_id, ensure_one_row,
+    decode_u32, decode_u64, encode_job_id, ensure_claim_row, ensure_one_row,
 };
 
 #[derive(Debug)]
@@ -260,15 +260,20 @@ impl PgJobRepository {
             WHERE id = $1
               AND job_id = $2
               AND state = 'running'
+              AND worker_id = $4
+              AND claim_token = $5
+              AND lease_expires_at > CURRENT_TIMESTAMP
               AND $3 BETWEEN progress_completed AND progress_total
             "#,
         )
         .bind(claimed.attempt_id())
         .bind(job_id)
         .bind(completed)
+        .bind(claimed.worker_id().as_uuid())
+        .bind(claimed.claim_token())
         .execute(&mut *transaction)
         .await?;
-        ensure_one_row(attempt.rows_affected(), "update attempt progress")?;
+        ensure_claim_row(attempt.rows_affected())?;
 
         let job = sqlx::query(
             r#"
@@ -309,11 +314,12 @@ impl PgJobRepository {
         let duration_ms = encode_duration(duration)?;
         let job_id = encode_job_id(claimed.job_id())?;
         let mut transaction = self.pool.begin().await?;
+        lock_active_claim(&mut transaction, claimed, job_id).await?;
         for output in outputs {
             insert_output_artifact(&mut transaction, job_id, claimed.attempt_id(), output).await?;
         }
 
-        complete_attempt(&mut transaction, claimed.attempt_id(), job_id, duration_ms).await?;
+        complete_attempt(&mut transaction, claimed, job_id, duration_ms).await?;
         let noun = if inputs.len() == 1 { "image" } else { "images" };
         let message = format!("{} {noun} resized", inputs.len());
         let job = sqlx::query(
@@ -575,7 +581,7 @@ async fn insert_output_artifact(
 
 async fn complete_attempt(
     transaction: &mut Transaction<'_, Postgres>,
-    attempt_id: i64,
+    claimed: &ClaimedJob,
     job_id: i64,
     duration_ms: i64,
 ) -> Result<(), RepositoryError> {
@@ -589,14 +595,52 @@ async fn complete_attempt(
         WHERE id = $1
           AND job_id = $2
           AND state = 'running'
+          AND worker_id = $4
+          AND claim_token = $5
+          AND lease_expires_at > CURRENT_TIMESTAMP
         "#,
     )
-    .bind(attempt_id)
+    .bind(claimed.attempt_id())
     .bind(job_id)
     .bind(duration_ms)
+    .bind(claimed.worker_id().as_uuid())
+    .bind(claimed.claim_token())
     .execute(&mut **transaction)
     .await?;
-    ensure_one_row(attempt.rows_affected(), "complete attempt")
+    ensure_claim_row(attempt.rows_affected())
+}
+
+async fn lock_active_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    claimed: &ClaimedJob,
+    job_id: i64,
+) -> Result<(), RepositoryError> {
+    let active = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT 1
+        FROM job_attempts AS attempt
+        INNER JOIN jobs AS job ON job.id = attempt.job_id
+        WHERE attempt.id = $1
+          AND attempt.job_id = $2
+          AND attempt.worker_id = $3
+          AND attempt.claim_token = $4
+          AND attempt.state = 'running'
+          AND attempt.lease_expires_at > CURRENT_TIMESTAMP
+          AND job.state = 'running'
+        FOR UPDATE OF attempt, job
+        "#,
+    )
+    .bind(claimed.attempt_id())
+    .bind(job_id)
+    .bind(claimed.worker_id().as_uuid())
+    .bind(claimed.claim_token())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if active.is_some() {
+        Ok(())
+    } else {
+        Err(RepositoryError::ClaimLost)
+    }
 }
 
 fn encode_duration(value: Duration) -> Result<i64, RepositoryError> {

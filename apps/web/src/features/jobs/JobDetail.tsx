@@ -304,6 +304,20 @@ function AttemptHistory({
                       {attempt.progress.completed}/{attempt.progress.total}
                     </dd>
                   </div>
+                  {attempt.worker !== null && (
+                    <div>
+                      <dt>Worker</dt>
+                      <dd title={attempt.worker.id}>
+                        {attempt.worker.name} · {attempt.worker.id.slice(0, 8)}
+                      </dd>
+                    </div>
+                  )}
+                  {attempt.lease_expires_at !== null && (
+                    <div>
+                      <dt>Lease through</dt>
+                      <dd>{formatDateTime(attempt.lease_expires_at)}</dd>
+                    </div>
+                  )}
                 </dl>
                 {attempt.error_message && (
                   <p>
