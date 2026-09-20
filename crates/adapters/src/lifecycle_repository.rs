@@ -349,6 +349,7 @@ impl PgJobRepository {
                 max_width,
                 jpeg_quality,
                 max_attempts,
+                priority,
                 retry_of_job_id
             )
             SELECT
@@ -361,6 +362,7 @@ impl PgJobRepository {
                 max_width,
                 jpeg_quality,
                 max_attempts,
+                priority,
                 id
             FROM jobs
             WHERE id = $1

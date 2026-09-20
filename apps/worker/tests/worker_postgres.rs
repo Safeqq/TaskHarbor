@@ -8,7 +8,7 @@ use taskharbor_adapters::{
     AttemptStatus, ImageService, JobRecord, LocalStorage, NewImageJob, NewInputArtifact,
     PgJobRepository, RepositoryError,
 };
-use taskharbor_core::{JobName, JobStatus};
+use taskharbor_core::{JobName, JobPriority, JobStatus};
 use taskharbor_worker::{process_claimed, process_next, run};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
@@ -29,7 +29,9 @@ async fn finishes_the_active_job_before_graceful_shutdown() {
     let setup_pool = PgPool::connect(&database_url)
         .await
         .expect("test setup should connect");
-    sqlx::query("TRUNCATE job_attempts, jobs RESTART IDENTITY CASCADE")
+    sqlx::query(
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+    )
         .execute(&setup_pool)
         .await
         .expect("test tables should be reset");
@@ -105,7 +107,9 @@ async fn fails_the_whole_job_without_publishing_partial_outputs() {
     let setup_pool = PgPool::connect(&database_url)
         .await
         .expect("test setup should connect");
-    sqlx::query("TRUNCATE artifacts, job_attempts, jobs RESTART IDENTITY CASCADE")
+    sqlx::query(
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+    )
         .execute(&setup_pool)
         .await
         .expect("test tables should be reset");
@@ -145,6 +149,8 @@ async fn fails_the_whole_job_without_publishing_partial_outputs() {
             name: JobName::new("partial output guard").expect("test name should be valid"),
             max_width: 2,
             jpeg_quality: 85,
+            available_at: None,
+            priority: JobPriority::Normal,
             inputs,
         })
         .await
@@ -211,7 +217,9 @@ async fn transient_failure_retries_and_preserves_attempt_history() {
     let setup_pool = PgPool::connect(&database_url)
         .await
         .expect("test setup should connect");
-    sqlx::query("TRUNCATE artifacts, job_attempts, jobs RESTART IDENTITY CASCADE")
+    sqlx::query(
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+    )
         .execute(&setup_pool)
         .await
         .expect("test tables should be reset");
@@ -318,7 +326,9 @@ async fn worker_finishes_requested_cancellation_at_a_safe_boundary() {
     let setup_pool = PgPool::connect(&database_url)
         .await
         .expect("test setup should connect");
-    sqlx::query("TRUNCATE artifacts, job_attempts, jobs RESTART IDENTITY CASCADE")
+    sqlx::query(
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+    )
         .execute(&setup_pool)
         .await
         .expect("test tables should be reset");
@@ -375,7 +385,9 @@ async fn cancel_completion_interleavings_have_one_terminal_winner() {
     let setup_pool = PgPool::connect(&database_url)
         .await
         .expect("test setup should connect");
-    sqlx::query("TRUNCATE artifacts, job_attempts, jobs RESTART IDENTITY CASCADE")
+    sqlx::query(
+        "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+    )
         .execute(&setup_pool)
         .await
         .expect("test tables should be reset");
@@ -461,6 +473,8 @@ async fn create_image_fixture(
             name: JobName::new(name).expect("test name should be valid"),
             max_width: 2,
             jpeg_quality: 85,
+            available_at: None,
+            priority: JobPriority::Normal,
             inputs: vec![NewInputArtifact {
                 storage_key: storage_key.clone(),
                 display_name: "input.png".into(),

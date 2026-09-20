@@ -30,6 +30,9 @@ const job: Job = {
   outputs: [],
   attempts: [],
   available_at: "2026-09-18T08:00:00Z",
+  priority: "normal",
+  schedule_id: null,
+  scheduled_for: null,
   max_attempts: 3,
   retry_of_job_id: null,
   result: null,
@@ -80,6 +83,7 @@ describe("jobs API client", () => {
       [new File(["png"], "source.png", { type: "image/png" })],
       1600,
       85,
+      { priority: "normal", availableAt: null },
     );
 
     await expect(request).rejects.toMatchObject<Partial<ApiError>>({
@@ -99,7 +103,12 @@ describe("jobs API client", () => {
     vi.stubGlobal("fetch", fetchMock);
     const image = new File(["png"], "source.png", { type: "image/png" });
 
-    await expect(createImageJob(job.name, [image], 1200, 90)).resolves.toEqual(job);
+    await expect(
+      createImageJob(job.name, [image], 1200, 90, {
+        priority: "high",
+        availableAt: "2026-09-20T08:00:00.000Z",
+      }),
+    ).resolves.toEqual(job);
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.headers).toBeUndefined();
@@ -108,6 +117,8 @@ describe("jobs API client", () => {
     expect(form.get("name")).toBe(job.name);
     expect(form.get("max_width")).toBe("1200");
     expect(form.get("jpeg_quality")).toBe("90");
+    expect(form.get("priority")).toBe("high");
+    expect(form.get("available_at")).toBe("2026-09-20T08:00:00.000Z");
     expect(form.getAll("images")).toEqual([image]);
   });
 

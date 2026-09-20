@@ -2,9 +2,12 @@ use axum::extract::Multipart;
 use axum::extract::multipart::{Field, MultipartRejection};
 use taskharbor_adapters::{
     DEFAULT_JPEG_QUALITY, DEFAULT_OUTPUT_WIDTH, ImageError, MAX_FILE_BYTES, MAX_FILES_PER_JOB,
-    MAX_OUTPUT_WIDTH, MAX_TOTAL_FILE_BYTES, NewImageJob, NewInputArtifact,
+    MAX_OUTPUT_WIDTH, MAX_SCHEDULE_INTERVAL_SECONDS, MAX_TOTAL_FILE_BYTES,
+    MIN_SCHEDULE_INTERVAL_SECONDS, NewImageJob, NewInputArtifact, NewSchedule,
 };
-use taskharbor_core::JobName;
+use taskharbor_core::{JobName, JobPriority};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::io::AsyncWriteExt;
 
 use crate::AppState;
@@ -24,7 +27,7 @@ pub async fn create_image_job(
         .await
         .map_err(ApiError::storage)?;
 
-    let staged = stage_fields(state, &batch, multipart).await;
+    let staged = stage_fields(state, &batch, multipart, UploadTarget::Job).await;
     let request = match staged {
         Ok(request) => request,
         Err(error) => {
@@ -37,19 +40,96 @@ pub async fn create_image_job(
     // inputs so a job that did commit never points at files we deleted.
     state
         .jobs
-        .create_image_job(request)
+        .create_image_job(NewImageJob {
+            name: request.name,
+            max_width: request.max_width,
+            jpeg_quality: request.jpeg_quality,
+            available_at: request.available_at,
+            priority: request.priority,
+            inputs: request.inputs,
+        })
         .await
         .map_err(ApiError::repository)
+}
+
+pub async fn create_schedule(
+    state: &AppState,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Result<taskharbor_adapters::ScheduleRecord, ApiError> {
+    let multipart = multipart
+        .map_err(|_| ApiError::invalid_multipart("request must be valid multipart form data"))?;
+    let batch = state
+        .storage
+        .begin_upload()
+        .await
+        .map_err(ApiError::storage)?;
+
+    let staged = stage_fields(state, &batch, multipart, UploadTarget::Schedule).await;
+    let request = match staged {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = batch.cleanup().await;
+            return Err(error);
+        }
+    };
+
+    state
+        .jobs
+        .create_schedule(NewSchedule {
+            name: request.name,
+            interval_seconds: request.interval_seconds.ok_or_else(|| {
+                ApiError::upload_validation(
+                    "missing_interval",
+                    "schedule interval is required",
+                    "interval_seconds",
+                )
+            })?,
+            anchor_at: request.anchor_at.ok_or_else(|| {
+                ApiError::upload_validation(
+                    "missing_anchor",
+                    "schedule anchor time is required",
+                    "anchor_at",
+                )
+            })?,
+            priority: request.priority,
+            max_width: request.max_width,
+            jpeg_quality: request.jpeg_quality,
+            inputs: request.inputs,
+        })
+        .await
+        .map_err(ApiError::repository)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadTarget {
+    Job,
+    Schedule,
+}
+
+struct StagedImageFields {
+    name: JobName,
+    max_width: u32,
+    jpeg_quality: u8,
+    available_at: Option<OffsetDateTime>,
+    priority: JobPriority,
+    interval_seconds: Option<u32>,
+    anchor_at: Option<OffsetDateTime>,
+    inputs: Vec<NewInputArtifact>,
 }
 
 async fn stage_fields(
     state: &AppState,
     batch: &taskharbor_adapters::UploadBatch,
     mut multipart: Multipart,
-) -> Result<NewImageJob, ApiError> {
+    target: UploadTarget,
+) -> Result<StagedImageFields, ApiError> {
     let mut name = None;
     let mut max_width = None;
     let mut jpeg_quality = None;
+    let mut available_at = None;
+    let mut priority = None;
+    let mut interval_seconds = None;
+    let mut anchor_at = None;
     let mut inputs = Vec::new();
     let mut total_bytes = 0_u64;
 
@@ -98,6 +178,36 @@ async fn stage_fields(
                     ));
                 }
                 set_once(&mut jpeg_quality, value, "jpeg_quality")?;
+            }
+            "priority" => {
+                let value = read_small_text(field, "priority").await?;
+                let value = value.parse::<JobPriority>().map_err(|_| {
+                    ApiError::upload_validation(
+                        "invalid_priority",
+                        "priority must be high, normal, or low",
+                        "priority",
+                    )
+                })?;
+                set_once(&mut priority, value, "priority")?;
+            }
+            "available_at" if target == UploadTarget::Job => {
+                let value = read_small_text(field, "available_at").await?;
+                let value = parse_timestamp(&value, "available_at")?;
+                set_once(&mut available_at, value, "available_at")?;
+            }
+            "interval_seconds" if target == UploadTarget::Schedule => {
+                let value = read_small_text(field, "interval_seconds").await?;
+                let value = value.parse::<u32>().map_err(|_| invalid_interval())?;
+                if !(MIN_SCHEDULE_INTERVAL_SECONDS..=MAX_SCHEDULE_INTERVAL_SECONDS).contains(&value)
+                {
+                    return Err(invalid_interval());
+                }
+                set_once(&mut interval_seconds, value, "interval_seconds")?;
+            }
+            "anchor_at" if target == UploadTarget::Schedule => {
+                let value = read_small_text(field, "anchor_at").await?;
+                let value = parse_timestamp(&value, "anchor_at")?;
+                set_once(&mut anchor_at, value, "anchor_at")?;
             }
             "images" => {
                 if inputs.len() >= MAX_FILES_PER_JOB {
@@ -159,12 +269,36 @@ async fn stage_fields(
         ));
     }
 
-    Ok(NewImageJob {
+    Ok(StagedImageFields {
         name,
         max_width: max_width.unwrap_or(DEFAULT_OUTPUT_WIDTH),
         jpeg_quality: jpeg_quality.unwrap_or(DEFAULT_JPEG_QUALITY),
+        available_at,
+        priority: priority.unwrap_or_default(),
+        interval_seconds,
+        anchor_at,
         inputs,
     })
+}
+
+fn parse_timestamp(value: &str, field: &'static str) -> Result<OffsetDateTime, ApiError> {
+    OffsetDateTime::parse(value.trim(), &Rfc3339).map_err(|_| {
+        ApiError::upload_validation(
+            "invalid_timestamp",
+            "timestamp must be an RFC 3339 value with a UTC offset",
+            field,
+        )
+    })
+}
+
+fn invalid_interval() -> ApiError {
+    ApiError::upload_validation(
+        "invalid_interval",
+        format!(
+            "interval must be between {MIN_SCHEDULE_INTERVAL_SECONDS} and {MAX_SCHEDULE_INTERVAL_SECONDS} seconds"
+        ),
+        "interval_seconds",
+    )
 }
 
 async fn write_image_field(

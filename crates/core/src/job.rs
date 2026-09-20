@@ -114,6 +114,48 @@ pub enum JobType {
     ImageResize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JobPriority {
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
+impl JobPriority {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+        }
+    }
+}
+
+impl FromStr for JobPriority {
+    type Err = JobPriorityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "high" => Ok(Self::High),
+            "normal" => Ok(Self::Normal),
+            "low" => Ok(Self::Low),
+            _ => Err(JobPriorityParseError),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobPriorityParseError;
+
+impl Display for JobPriorityParseError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "job priority is not recognized")
+    }
+}
+
+impl Error for JobPriorityParseError {}
+
 impl JobType {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -235,8 +277,8 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::{
-        Job, JobId, JobIdError, JobName, JobNameError, JobStatus, JobStatusParseError, JobType,
-        JobTypeParseError, MAX_JOB_NAME_LENGTH,
+        Job, JobId, JobIdError, JobName, JobNameError, JobPriority, JobPriorityParseError,
+        JobStatus, JobStatusParseError, JobType, JobTypeParseError, MAX_JOB_NAME_LENGTH,
     };
 
     #[test]
@@ -309,5 +351,13 @@ mod tests {
         assert_eq!("demo_delay".parse(), Ok(JobType::DemoDelay));
         assert_eq!("image_resize".parse(), Ok(JobType::ImageResize));
         assert_eq!("unknown".parse::<JobType>(), Err(JobTypeParseError));
+    }
+
+    #[test]
+    fn parses_supported_job_priorities() {
+        assert_eq!("high".parse(), Ok(JobPriority::High));
+        assert_eq!("normal".parse(), Ok(JobPriority::Normal));
+        assert_eq!("low".parse(), Ok(JobPriority::Low));
+        assert_eq!("urgent".parse::<JobPriority>(), Err(JobPriorityParseError));
     }
 }

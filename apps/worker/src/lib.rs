@@ -22,6 +22,23 @@ pub async fn run(
             return Ok(());
         }
 
+        if let Some(tick) = repository.materialize_next_schedule().await? {
+            match tick.job_id() {
+                Some(job_id) => println!(
+                    "Scheduler created job {job_id} for schedule {} at {} ({} older slots coalesced)",
+                    tick.schedule_id(),
+                    tick.scheduled_for(),
+                    tick.coalesced_slots()
+                ),
+                None => println!(
+                    "Scheduler skipped schedule {} at {} because an earlier occurrence is active",
+                    tick.schedule_id(),
+                    tick.scheduled_for()
+                ),
+            }
+            continue;
+        }
+
         if process_next(&repository, &images, &storage).await? {
             continue;
         }

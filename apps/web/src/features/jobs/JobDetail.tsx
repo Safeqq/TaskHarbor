@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   artifactDownloadUrl,
   cancelJob,
+  displayJobStatus,
   errorMessage,
   isAbortError,
   retryJob,
@@ -92,7 +93,7 @@ export function JobDetail({ job, onUpdated, onRetried }: JobDetailProps) {
           <div className="section-kicker">Job #{job.id.toString().padStart(3, "0")}</div>
           <h2 id="job-detail-title">{job.name}</h2>
         </div>
-        <StatusBadge status={job.status} />
+        <StatusBadge status={displayJobStatus(job)} />
       </div>
 
       <div className="detail-actions">
@@ -146,11 +147,22 @@ export function JobDetail({ job, onUpdated, onRetried }: JobDetailProps) {
       <dl className="detail-grid">
         <DetailItem label="Job type" value={job.job_type} mono />
         <DetailItem
+          label="Priority"
+          value={job.priority.charAt(0).toUpperCase() + job.priority.slice(1)}
+        />
+        <DetailItem label="Available" value={formatDateTime(job.available_at)} />
+        <DetailItem
           label="Attempts"
           value={`${job.attempts.length}/${job.max_attempts.toLocaleString()}`}
         />
         {job.retry_of_job_id !== null && (
           <DetailItem label="Manual retry of" value={`Job #${job.retry_of_job_id}`} mono />
+        )}
+        {job.schedule_id !== null && (
+          <DetailItem label="Schedule" value={`Schedule #${job.schedule_id}`} mono />
+        )}
+        {job.scheduled_for !== null && (
+          <DetailItem label="Scheduled slot" value={formatDateTime(job.scheduled_for)} />
         )}
         {job.image_settings ? (
           <>

@@ -4,18 +4,24 @@ import { CreateJobForm } from "./features/jobs/CreateJobForm";
 import { JobDetail } from "./features/jobs/JobDetail";
 import { JobList } from "./features/jobs/JobList";
 import { formatRefreshTime, statusLabel } from "./features/jobs/format";
-import type { Job, JobStatus } from "./features/jobs/api";
+import {
+  displayJobStatus,
+  type DisplayJobStatus,
+  type Job,
+} from "./features/jobs/api";
 import {
   DEFAULT_POLL_INTERVAL_MS,
   useJobs,
 } from "./features/jobs/useJobs";
+import { SchedulesPage } from "./features/schedules/SchedulesPage";
 
 interface AppProps {
   pollIntervalMs?: number;
 }
 
-const statuses: JobStatus[] = [
+const statuses: DisplayJobStatus[] = [
   "queued",
+  "scheduled",
   "running",
   "retry_waiting",
   "cancel_requested",
@@ -35,6 +41,7 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
     upsertJob,
   } = useJobs(pollIntervalMs);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [activeView, setActiveView] = useState<"jobs" | "schedules">("jobs");
 
   useEffect(() => {
     if (selectedId === null && jobs.length > 0) {
@@ -50,13 +57,14 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
   const selectedJob = jobs.find((job) => job.id === selectedId) ?? null;
   const statusCounts = useMemo(
     () =>
-      statuses.reduce<Record<JobStatus, number>>(
+      statuses.reduce<Record<DisplayJobStatus, number>>(
         (counts, status) => ({
           ...counts,
-          [status]: jobs.filter((job) => job.status === status).length,
+          [status]: jobs.filter((job) => displayJobStatus(job) === status).length,
         }),
         {
           queued: 0,
+          scheduled: 0,
           running: 0,
           retry_waiting: 0,
           cancel_requested: 0,
@@ -102,6 +110,22 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
             Task<span>Harbor</span>
           </span>
         </a>
+        <nav className="topbar__nav" aria-label="Primary navigation">
+          <button
+            type="button"
+            className={activeView === "jobs" ? "topbar__nav-button topbar__nav-button--active" : "topbar__nav-button"}
+            onClick={() => setActiveView("jobs")}
+          >
+            Jobs
+          </button>
+          <button
+            type="button"
+            className={activeView === "schedules" ? "topbar__nav-button topbar__nav-button--active" : "topbar__nav-button"}
+            onClick={() => setActiveView("schedules")}
+          >
+            Schedules
+          </button>
+        </nav>
         <div className="topbar__context">
           <span className="environment-label">Local workspace</span>
           <span className={`connection-pill${error ? " connection-pill--error" : ""}`}>
@@ -111,6 +135,7 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
         </div>
       </header>
 
+      {activeView === "jobs" ? (
       <main id="main-content">
         <section className="hero" aria-labelledby="page-title">
           <div>
@@ -194,6 +219,16 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
 
         <JobDetail job={selectedJob} onUpdated={handleUpdated} onRetried={handleCreated} />
       </main>
+      ) : (
+        <SchedulesPage
+          pollIntervalMs={pollIntervalMs}
+          onOpenJob={(id) => {
+            setSelectedId(id);
+            setActiveView("jobs");
+            refresh();
+          }}
+        />
+      )}
 
       <footer>
         <span>TaskHarbor</span>

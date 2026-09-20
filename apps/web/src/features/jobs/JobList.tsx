@@ -1,4 +1,4 @@
-import type { Job } from "./api";
+import { displayJobStatus, type Job } from "./api";
 import { formatDateTime } from "./format";
 import { JobProgress } from "./JobProgress";
 import { StatusBadge } from "./StatusBadge";
@@ -28,7 +28,7 @@ export function JobList({ jobs, selectedId, onSelect }: JobListProps) {
               <span className="job-row__time">Created {formatDateTime(job.created_at)}</span>
             </span>
             <span className="job-row__state">
-              <StatusBadge status={job.status} />
+              <StatusBadge status={displayJobStatus(job)} />
               <JobProgress progress={job.progress} compact />
             </span>
             <ChevronIcon />

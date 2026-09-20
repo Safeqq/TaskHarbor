@@ -6,12 +6,14 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use taskharbor_adapters::{
     ArtifactKind, ArtifactRecord, AttemptRecord, AttemptStatus, JobRecord, JobSettings,
-    MAX_TOTAL_FILE_BYTES,
+    MAX_OUTPUT_WIDTH, MAX_SCHEDULE_INTERVAL_SECONDS, MAX_TOTAL_FILE_BYTES,
+    MIN_SCHEDULE_INTERVAL_SECONDS, ScheduleInputRecord, ScheduleOccurrenceRecord, ScheduleRecord,
+    UpdateSchedule,
 };
-use taskharbor_core::{JobId, JobStatus, JobType};
+use taskharbor_core::{JobId, JobName, JobPriority, JobStatus, JobType, ScheduleId};
 use time::OffsetDateTime;
 use tokio_util::io::ReaderStream;
 
@@ -28,6 +30,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/jobs/{id}", get(get_job))
         .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{id}/retry", post(retry_job))
+        .route(
+            "/api/v1/schedules",
+            get(list_schedules).post(create_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{id}",
+            get(get_schedule).put(update_schedule),
+        )
         .route("/api/v1/artifacts/{id}/download", get(download_artifact))
         .layer(DefaultBodyLimit::max(
             usize::try_from(MAX_TOTAL_FILE_BYTES).unwrap_or(25 * 1024 * 1024)
@@ -111,10 +121,68 @@ async fn retry_job(
     Ok((StatusCode::CREATED, Json(job.into())))
 }
 
+async fn create_schedule(
+    State(state): State<AppState>,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Result<(StatusCode, Json<ScheduleResponse>), ApiError> {
+    let schedule = upload::create_schedule(&state, multipart).await?;
+    Ok((StatusCode::CREATED, Json(schedule.into())))
+}
+
+async fn list_schedules(
+    State(state): State<AppState>,
+) -> Result<Json<ListSchedulesResponse>, ApiError> {
+    let schedules = state
+        .jobs
+        .list_schedules()
+        .await
+        .map_err(ApiError::repository)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(Json(ListSchedulesResponse { schedules }))
+}
+
+async fn get_schedule(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Result<Json<ScheduleResponse>, ApiError> {
+    let id = parse_schedule_id(&raw_id)?;
+    let schedule = state
+        .jobs
+        .get_schedule(id)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(ApiError::schedule_not_found)?;
+    Ok(Json(schedule.into()))
+}
+
+async fn update_schedule(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    Json(request): Json<UpdateScheduleRequest>,
+) -> Result<Json<ScheduleResponse>, ApiError> {
+    let id = parse_schedule_id(&raw_id)?;
+    let request = request.validate()?;
+    let schedule = state
+        .jobs
+        .update_schedule(id, request)
+        .await
+        .map_err(ApiError::repository)?
+        .ok_or_else(ApiError::schedule_not_found)?;
+    Ok(Json(schedule.into()))
+}
+
 fn parse_job_id(raw_id: &str) -> Result<JobId, ApiError> {
     raw_id
         .parse::<JobId>()
         .map_err(|_| ApiError::job_not_found())
+}
+
+fn parse_schedule_id(raw_id: &str) -> Result<ScheduleId, ApiError> {
+    raw_id
+        .parse::<ScheduleId>()
+        .map_err(|_| ApiError::schedule_not_found())
 }
 
 async fn download_artifact(
@@ -167,6 +235,169 @@ struct ListJobsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct ListSchedulesResponse {
+    schedules: Vec<ScheduleResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateScheduleRequest {
+    name: String,
+    enabled: bool,
+    interval_seconds: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    anchor_at: OffsetDateTime,
+    priority: String,
+    max_width: u32,
+    jpeg_quality: u8,
+}
+
+impl UpdateScheduleRequest {
+    fn validate(self) -> Result<UpdateSchedule, ApiError> {
+        let name = JobName::new(self.name).map_err(ApiError::invalid_job_name)?;
+        if !(MIN_SCHEDULE_INTERVAL_SECONDS..=MAX_SCHEDULE_INTERVAL_SECONDS)
+            .contains(&self.interval_seconds)
+        {
+            return Err(ApiError::upload_validation(
+                "invalid_interval",
+                format!(
+                    "interval must be between {MIN_SCHEDULE_INTERVAL_SECONDS} and {MAX_SCHEDULE_INTERVAL_SECONDS} seconds"
+                ),
+                "interval_seconds",
+            ));
+        }
+        let priority = self.priority.parse::<JobPriority>().map_err(|_| {
+            ApiError::upload_validation(
+                "invalid_priority",
+                "priority must be high, normal, or low",
+                "priority",
+            )
+        })?;
+        if self.max_width == 0 || self.max_width > MAX_OUTPUT_WIDTH {
+            return Err(ApiError::upload_validation(
+                "invalid_max_width",
+                format!("max width must be between 1 and {MAX_OUTPUT_WIDTH} pixels"),
+                "max_width",
+            ));
+        }
+        if !(1..=100).contains(&self.jpeg_quality) {
+            return Err(ApiError::upload_validation(
+                "invalid_jpeg_quality",
+                "JPEG quality must be between 1 and 100",
+                "jpeg_quality",
+            ));
+        }
+
+        Ok(UpdateSchedule {
+            name,
+            enabled: self.enabled,
+            interval_seconds: self.interval_seconds,
+            anchor_at: self.anchor_at,
+            priority,
+            max_width: self.max_width,
+            jpeg_quality: self.jpeg_quality,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleResponse {
+    id: u64,
+    name: String,
+    enabled: bool,
+    interval_seconds: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    anchor_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    next_run_at: OffsetDateTime,
+    priority: &'static str,
+    image_settings: ImageSettingsResponse,
+    inputs: Vec<ScheduleInputResponse>,
+    occurrences: Vec<ScheduleOccurrenceResponse>,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: OffsetDateTime,
+}
+
+impl From<ScheduleRecord> for ScheduleResponse {
+    fn from(record: ScheduleRecord) -> Self {
+        Self {
+            id: record.id().get(),
+            name: record.name().as_str().to_owned(),
+            enabled: record.enabled(),
+            interval_seconds: record.interval_seconds(),
+            anchor_at: record.anchor_at(),
+            next_run_at: record.next_run_at(),
+            priority: record.priority().as_str(),
+            image_settings: ImageSettingsResponse {
+                max_width: record.max_width(),
+                jpeg_quality: record.jpeg_quality(),
+                output_media_type: "image/jpeg",
+                transparency_background: "white",
+            },
+            inputs: record.inputs().map(Into::into).collect(),
+            occurrences: record.occurrences().map(Into::into).collect(),
+            created_at: record.created_at(),
+            updated_at: record.updated_at(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleInputResponse {
+    id: u64,
+    item_index: u16,
+    filename: String,
+    media_type: String,
+    byte_size: u64,
+    width: u32,
+    height: u32,
+}
+
+impl From<&ScheduleInputRecord> for ScheduleInputResponse {
+    fn from(input: &ScheduleInputRecord) -> Self {
+        Self {
+            id: input.id(),
+            item_index: input.item_index(),
+            filename: input.display_name().to_owned(),
+            media_type: input.media_type().to_owned(),
+            byte_size: input.byte_size(),
+            width: input.width(),
+            height: input.height(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ScheduleOccurrenceResponse {
+    id: u64,
+    #[serde(with = "time::serde::rfc3339")]
+    scheduled_for: OffsetDateTime,
+    outcome: &'static str,
+    job_id: Option<u64>,
+    job_status: Option<JobStatusResponse>,
+    reason: Option<String>,
+    coalesced_slots: u64,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+}
+
+impl From<&ScheduleOccurrenceRecord> for ScheduleOccurrenceResponse {
+    fn from(occurrence: &ScheduleOccurrenceRecord) -> Self {
+        Self {
+            id: occurrence.id(),
+            scheduled_for: occurrence.scheduled_for(),
+            outcome: occurrence.outcome().as_str(),
+            job_id: occurrence.job_id().map(JobId::get),
+            job_status: occurrence.job_status().map(Into::into),
+            reason: occurrence.reason().map(str::to_owned),
+            coalesced_slots: occurrence.coalesced_slots(),
+            created_at: occurrence.created_at(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct JobResponse {
     id: u64,
     name: String,
@@ -180,6 +411,10 @@ struct JobResponse {
     attempts: Vec<AttemptResponse>,
     #[serde(with = "time::serde::rfc3339")]
     available_at: OffsetDateTime,
+    priority: &'static str,
+    schedule_id: Option<u64>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    scheduled_for: Option<OffsetDateTime>,
     max_attempts: u32,
     retry_of_job_id: Option<u64>,
     result: Option<JobResultResponse>,
@@ -235,6 +470,9 @@ impl From<JobRecord> for JobResponse {
             outputs,
             attempts,
             available_at: record.available_at(),
+            priority: record.priority().as_str(),
+            schedule_id: record.schedule_id().map(ScheduleId::get),
+            scheduled_for: record.scheduled_for(),
             max_attempts: record.max_attempts(),
             retry_of_job_id: record.retry_of_job_id().map(JobId::get),
             result,

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
-use taskharbor_core::{JobId, JobName};
+use taskharbor_core::{JobId, JobName, JobPriority};
 use time::OffsetDateTime;
 
 use crate::image_processing::{MAX_FILES_PER_JOB, MAX_OUTPUT_WIDTH};
@@ -15,6 +15,8 @@ pub struct NewImageJob {
     pub name: JobName,
     pub max_width: u32,
     pub jpeg_quality: u8,
+    pub available_at: Option<OffsetDateTime>,
+    pub priority: JobPriority,
     pub inputs: Vec<NewInputArtifact>,
 }
 
@@ -168,15 +170,19 @@ impl PgJobRepository {
             INSERT INTO jobs (
                 name,
                 job_type,
+                available_at,
+                priority,
                 progress_total,
                 max_width,
                 jpeg_quality
             )
-            VALUES ($1, 'image_resize', $2, $3, $4)
+            VALUES ($1, 'image_resize', COALESCE($2, CURRENT_TIMESTAMP), $3, $4, $5, $6)
             RETURNING id
             "#,
         )
         .bind(request.name.as_str())
+        .bind(request.available_at)
+        .bind(request.priority.as_str())
         .bind(progress_total)
         .bind(max_width)
         .bind(i16::from(request.jpeg_quality))

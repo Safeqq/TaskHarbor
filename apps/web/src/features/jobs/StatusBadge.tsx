@@ -1,8 +1,8 @@
-import type { JobStatus } from "./api";
+import type { DisplayJobStatus } from "./api";
 import { statusLabel } from "./format";
 
 interface StatusBadgeProps {
-  status: JobStatus;
+  status: DisplayJobStatus;
 }
 
 export function StatusBadge({ status }: StatusBadgeProps) {

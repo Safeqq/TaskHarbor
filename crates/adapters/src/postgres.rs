@@ -5,7 +5,7 @@ use std::time::Duration;
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
-use taskharbor_core::{Job, JobId, JobName, JobStatus, JobType};
+use taskharbor_core::{Job, JobId, JobName, JobPriority, JobStatus, JobType, ScheduleId};
 use time::OffsetDateTime;
 
 use crate::image_repository::{
@@ -71,6 +71,9 @@ impl PgJobRepository {
                 max_attempts,
                 retry_of_job_id,
                 cancel_requested_at,
+                priority,
+                schedule_id,
+                scheduled_for,
                 created_at,
                 started_at,
                 finished_at
@@ -104,6 +107,9 @@ impl PgJobRepository {
                 max_attempts,
                 retry_of_job_id,
                 cancel_requested_at,
+                priority,
+                schedule_id,
+                scheduled_for,
                 created_at,
                 started_at,
                 finished_at
@@ -143,6 +149,9 @@ impl PgJobRepository {
                 max_attempts,
                 retry_of_job_id,
                 cancel_requested_at,
+                priority,
+                schedule_id,
+                scheduled_for,
                 created_at,
                 started_at,
                 finished_at
@@ -163,6 +172,20 @@ impl PgJobRepository {
     }
 
     pub async fn claim_next(&self) -> Result<Option<ClaimedJob>, RepositoryError> {
+        self.claim_next_with_time(None).await
+    }
+
+    pub async fn claim_next_at(
+        &self,
+        as_of: OffsetDateTime,
+    ) -> Result<Option<ClaimedJob>, RepositoryError> {
+        self.claim_next_with_time(Some(as_of)).await
+    }
+
+    async fn claim_next_with_time(
+        &self,
+        as_of: Option<OffsetDateTime>,
+    ) -> Result<Option<ClaimedJob>, RepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let candidate = sqlx::query_as::<_, ClaimRow>(
             r#"
@@ -176,12 +199,20 @@ impl PgJobRepository {
                 max_attempts
             FROM jobs
             WHERE state IN ('queued', 'retry_waiting')
-              AND available_at <= CURRENT_TIMESTAMP
-            ORDER BY available_at, id
+              AND available_at <= COALESCE($1, CURRENT_TIMESTAMP)
+            ORDER BY
+                CASE priority
+                    WHEN 'high' THEN 0
+                    WHEN 'normal' THEN 1
+                    ELSE 2
+                END,
+                available_at,
+                id
             FOR UPDATE SKIP LOCKED
             LIMIT 1
             "#,
         )
+        .bind(as_of)
         .fetch_optional(&mut *transaction)
         .await?;
 
@@ -360,6 +391,9 @@ pub struct JobRecord {
     max_attempts: u32,
     retry_of_job_id: Option<JobId>,
     cancel_requested_at: Option<OffsetDateTime>,
+    priority: JobPriority,
+    schedule_id: Option<ScheduleId>,
+    scheduled_for: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     finished_at: Option<OffsetDateTime>,
@@ -424,6 +458,18 @@ impl JobRecord {
 
     pub const fn cancel_requested_at(&self) -> Option<OffsetDateTime> {
         self.cancel_requested_at
+    }
+
+    pub const fn priority(&self) -> JobPriority {
+        self.priority
+    }
+
+    pub const fn schedule_id(&self) -> Option<ScheduleId> {
+        self.schedule_id
+    }
+
+    pub const fn scheduled_for(&self) -> Option<OffsetDateTime> {
+        self.scheduled_for
     }
 
     pub const fn created_at(&self) -> OffsetDateTime {
@@ -545,6 +591,9 @@ struct JobRow {
     max_attempts: i32,
     retry_of_job_id: Option<i64>,
     cancel_requested_at: Option<OffsetDateTime>,
+    priority: String,
+    schedule_id: Option<i64>,
+    scheduled_for: Option<OffsetDateTime>,
     created_at: OffsetDateTime,
     started_at: Option<OffsetDateTime>,
     finished_at: Option<OffsetDateTime>,
@@ -579,6 +628,16 @@ impl JobRow {
         if max_attempts == 0 || max_attempts > MAX_ATTEMPTS {
             return Err(RepositoryError::InvalidData(
                 "max attempts violates its invariant".into(),
+            ));
+        }
+        let priority = self
+            .priority
+            .parse::<JobPriority>()
+            .map_err(|error| RepositoryError::InvalidData(error.to_string()))?;
+        let schedule_id = self.schedule_id.map(decode_schedule_id).transpose()?;
+        if schedule_id.is_some() != self.scheduled_for.is_some() {
+            return Err(RepositoryError::InvalidData(
+                "job schedule origin violates its invariant".into(),
             ));
         }
 
@@ -617,6 +676,9 @@ impl JobRow {
             max_attempts,
             retry_of_job_id: self.retry_of_job_id.map(decode_job_id).transpose()?,
             cancel_requested_at: self.cancel_requested_at,
+            priority,
+            schedule_id,
+            scheduled_for: self.scheduled_for,
             created_at: self.created_at,
             started_at: self.started_at,
             finished_at: self.finished_at,
@@ -638,6 +700,16 @@ struct ClaimRow {
 pub(crate) fn decode_job_id(value: i64) -> Result<JobId, RepositoryError> {
     let value = decode_u64(value, "job ID")?;
     JobId::new(value).map_err(|error| RepositoryError::InvalidData(error.to_string()))
+}
+
+pub(crate) fn decode_schedule_id(value: i64) -> Result<ScheduleId, RepositoryError> {
+    let value = decode_u64(value, "schedule ID")?;
+    ScheduleId::new(value).map_err(|error| RepositoryError::InvalidData(error.to_string()))
+}
+
+pub(crate) fn encode_schedule_id(value: ScheduleId) -> Result<i64, RepositoryError> {
+    i64::try_from(value.get())
+        .map_err(|_| RepositoryError::InvalidData("schedule ID exceeds BIGINT".into()))
 }
 
 pub(crate) fn encode_job_id(id: JobId) -> Result<i64, RepositoryError> {
@@ -695,7 +767,9 @@ mod tests {
             .migrate()
             .await
             .expect("migrations should succeed");
-        sqlx::query("TRUNCATE job_attempts, jobs RESTART IDENTITY CASCADE")
+        sqlx::query(
+            "TRUNCATE schedule_occurrences, schedule_inputs, artifacts, job_attempts, jobs, schedules RESTART IDENTITY CASCADE",
+        )
             .execute(&repository.pool)
             .await
             .expect("test tables should be reset");

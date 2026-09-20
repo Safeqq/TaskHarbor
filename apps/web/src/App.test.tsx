@@ -3,12 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { ApiError, type Job } from "./features/jobs/api";
+import type { Schedule } from "./features/schedules/api";
 
 const apiMocks = vi.hoisted(() => ({
   listJobs: vi.fn(),
   createImageJob: vi.fn(),
   cancelJob: vi.fn(),
   retryJob: vi.fn(),
+}));
+
+const scheduleMocks = vi.hoisted(() => ({
+  listSchedules: vi.fn(),
+  createSchedule: vi.fn(),
+  updateSchedule: vi.fn(),
 }));
 
 vi.mock("./features/jobs/api", async (importOriginal) => {
@@ -19,6 +26,16 @@ vi.mock("./features/jobs/api", async (importOriginal) => {
     createImageJob: apiMocks.createImageJob,
     cancelJob: apiMocks.cancelJob,
     retryJob: apiMocks.retryJob,
+  };
+});
+
+vi.mock("./features/schedules/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./features/schedules/api")>();
+  return {
+    ...actual,
+    listSchedules: scheduleMocks.listSchedules,
+    createSchedule: scheduleMocks.createSchedule,
+    updateSchedule: scheduleMocks.updateSchedule,
   };
 });
 
@@ -50,6 +67,9 @@ const queuedJob: Job = {
   outputs: [],
   attempts: [],
   available_at: "2026-09-18T09:00:00Z",
+  priority: "normal",
+  schedule_id: null,
+  scheduled_for: null,
   max_attempts: 3,
   retry_of_job_id: null,
   result: null,
@@ -60,11 +80,45 @@ const queuedJob: Job = {
   finished_at: null,
 };
 
+const recurringSchedule: Schedule = {
+  id: 7,
+  name: "Nightly catalog",
+  enabled: true,
+  interval_seconds: 3600,
+  anchor_at: "2026-09-20T01:00:00Z",
+  next_run_at: "2026-09-20T02:00:00Z",
+  priority: "normal",
+  image_settings: {
+    max_width: 1600,
+    jpeg_quality: 85,
+    output_media_type: "image/jpeg",
+    transparency_background: "white",
+  },
+  inputs: [],
+  occurrences: [
+    {
+      id: 3,
+      scheduled_for: "2026-09-20T01:00:00Z",
+      outcome: "created",
+      job_id: 41,
+      job_status: "queued",
+      reason: null,
+      coalesced_slots: 0,
+      created_at: "2026-09-20T01:00:00Z",
+    },
+  ],
+  created_at: "2026-09-19T08:00:00Z",
+  updated_at: "2026-09-19T08:00:00Z",
+};
+
 beforeEach(() => {
   apiMocks.listJobs.mockReset();
   apiMocks.createImageJob.mockReset();
   apiMocks.cancelJob.mockReset();
   apiMocks.retryJob.mockReset();
+  scheduleMocks.listSchedules.mockReset();
+  scheduleMocks.createSchedule.mockReset();
+  scheduleMocks.updateSchedule.mockReset();
 });
 
 afterEach(() => {
@@ -123,6 +177,7 @@ describe("Jobs dashboard", () => {
       [image],
       1600,
       85,
+      { priority: "normal", availableAt: null },
       expect.any(AbortSignal),
     );
     expect(
@@ -148,6 +203,29 @@ describe("Jobs dashboard", () => {
 
     expect(apiMocks.cancelJob).toHaveBeenCalledWith(queuedJob.id, expect.any(AbortSignal));
     expect(await screen.findByRole("button", { name: "Retry as new job" })).toBeInTheDocument();
+  });
+
+  it("labels future queued work as scheduled", async () => {
+    apiMocks.listJobs.mockResolvedValue([
+      { ...queuedJob, available_at: "2099-01-01T00:00:00Z" },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByText("Scheduled")).toBeInTheDocument();
+  });
+
+  it("opens the schedules page and shows occurrence history", async () => {
+    apiMocks.listJobs.mockResolvedValue([queuedJob]);
+    scheduleMocks.listSchedules.mockResolvedValue([recurringSchedule]);
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Schedules" }));
+
+    expect(await screen.findByRole("heading", { name: "Recurring work, anchored." })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: recurringSchedule.name })).toBeInTheDocument();
+    expect(screen.getByText("Occurrence history")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Job #41/ })).toBeInTheDocument();
   });
 
   it("waits for each poll to finish and aborts the active request on unmount", async () => {

@@ -103,6 +103,15 @@ impl ApiError {
         }
     }
 
+    pub fn schedule_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "schedule_not_found",
+            message: "schedule was not found".into(),
+            field: None,
+        }
+    }
+
     pub fn repository(error: RepositoryError) -> Self {
         match error {
             RepositoryError::Database(_) | RepositoryError::Migration(_) => Self {

@@ -1,4 +1,4 @@
-import type { JobStatus } from "./api";
+import type { DisplayJobStatus } from "./api";
 
 const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -45,7 +45,7 @@ export function formatBytes(value: number): string {
   return `${size.toLocaleString(undefined, { maximumFractionDigits: digits })} ${units[unitIndex]}`;
 }
 
-export function statusLabel(status: JobStatus): string {
+export function statusLabel(status: DisplayJobStatus): string {
   const words = status.split("_").join(" ");
   return words.charAt(0).toUpperCase() + words.slice(1);
 }

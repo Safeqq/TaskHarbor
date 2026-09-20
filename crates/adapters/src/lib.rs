@@ -2,6 +2,7 @@ mod image_processing;
 mod image_repository;
 mod lifecycle_repository;
 mod postgres;
+mod schedule_repository;
 mod storage;
 
 pub use image_processing::{
@@ -18,5 +19,10 @@ pub use lifecycle_repository::{
 };
 pub use postgres::{
     ClaimedJob, ClaimedWork, DEMO_DELAY_MS, JobRecord, PgJobRepository, RepositoryError,
+};
+pub use schedule_repository::{
+    MAX_SCHEDULE_INTERVAL_SECONDS, MIN_SCHEDULE_INTERVAL_SECONDS, NewSchedule, ScheduleInputRecord,
+    ScheduleOccurrenceOutcome, ScheduleOccurrenceRecord, ScheduleRecord, ScheduleTick,
+    UpdateSchedule,
 };
 pub use storage::{LocalStorage, StorageError, UploadBatch};

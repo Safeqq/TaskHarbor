@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 
-import { createImageJob, errorMessage, isAbortError, type Job } from "./api";
+import {
+  createImageJob,
+  displayJobStatus,
+  errorMessage,
+  isAbortError,
+  type Job,
+  type JobPriority,
+} from "./api";
 import { formatBytes } from "./format";
 
 const MAX_JOB_NAME_LENGTH = 100;
@@ -20,6 +27,8 @@ export function CreateJobForm({ onCreated }: CreateJobFormProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [maxWidth, setMaxWidth] = useState(DEFAULT_OUTPUT_WIDTH);
   const [jpegQuality, setJpegQuality] = useState(DEFAULT_JPEG_QUALITY);
+  const [priority, setPriority] = useState<JobPriority>("normal");
+  const [scheduledAt, setScheduledAt] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -64,6 +73,12 @@ export function CreateJobForm({ onCreated }: CreateJobFormProps) {
       return;
     }
 
+    const availableAt = scheduledAt === "" ? null : new Date(scheduledAt);
+    if (availableAt !== null && Number.isNaN(availableAt.getTime())) {
+      setError("Choose a valid local date and time.");
+      return;
+    }
+
     const controller = new AbortController();
     requestRef.current = controller;
     setIsSubmitting(true);
@@ -74,6 +89,10 @@ export function CreateJobForm({ onCreated }: CreateJobFormProps) {
         files,
         maxWidth,
         jpegQuality,
+        {
+          priority,
+          availableAt: availableAt?.toISOString() ?? null,
+        },
         controller.signal,
       );
       if (controller.signal.aborted) {
@@ -83,10 +102,15 @@ export function CreateJobForm({ onCreated }: CreateJobFormProps) {
       onCreated(job);
       setName("");
       setFiles([]);
+      setScheduledAt("");
       if (fileInputRef.current !== null) {
         fileInputRef.current.value = "";
       }
-      setNotice(`Job #${job.id} entered the queue.`);
+      setNotice(
+        displayJobStatus(job) === "scheduled"
+          ? `Job #${job.id} is scheduled.`
+          : `Job #${job.id} entered the queue.`,
+      );
     } catch (requestError) {
       if (!isAbortError(requestError)) {
         setError(errorMessage(requestError));
@@ -206,6 +230,35 @@ export function CreateJobForm({ onCreated }: CreateJobFormProps) {
               required
             />
             <span>1–100</span>
+          </div>
+        </div>
+
+        <div className="scheduling-fields">
+          <div>
+            <label htmlFor="job-priority">Priority</label>
+            <select
+              id="job-priority"
+              name="priority"
+              value={priority}
+              onChange={(event) => setPriority(event.currentTarget.value as JobPriority)}
+              disabled={isSubmitting}
+            >
+              <option value="high">High</option>
+              <option value="normal">Normal</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="job-available-at">Run at (optional)</label>
+            <input
+              id="job-available-at"
+              name="available_at"
+              type="datetime-local"
+              step="1"
+              value={scheduledAt}
+              onChange={(event) => setScheduledAt(event.currentTarget.value)}
+              disabled={isSubmitting}
+            />
           </div>
         </div>
 

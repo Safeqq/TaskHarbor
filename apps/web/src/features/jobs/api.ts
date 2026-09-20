@@ -8,6 +8,8 @@ export type JobStatus =
   | "cancelled";
 export type JobType = "demo_delay" | "image_resize";
 export type AttemptStatus = "running" | "succeeded" | "failed" | "cancelled";
+export type JobPriority = "high" | "normal" | "low";
+export type DisplayJobStatus = JobStatus | "scheduled";
 
 export interface JobProgress {
   completed: number;
@@ -61,6 +63,9 @@ export interface Job {
   outputs: Artifact[];
   attempts: JobAttempt[];
   available_at: string;
+  priority: JobPriority;
+  schedule_id: number | null;
+  scheduled_for: string | null;
   max_attempts: number;
   retry_of_job_id: number | null;
   result: JobResult | null;
@@ -106,7 +111,7 @@ export function errorMessage(error: unknown): string {
 }
 
 export async function listJobs(signal?: AbortSignal): Promise<Job[]> {
-  const response = await request<ListJobsResponse>("/api/v1/jobs", { signal });
+  const response = await apiRequest<ListJobsResponse>("/api/v1/jobs", { signal });
   return response.jobs;
 }
 
@@ -115,30 +120,45 @@ export async function createImageJob(
   images: File[],
   maxWidth: number,
   jpegQuality: number,
+  options: {
+    priority: JobPriority;
+    availableAt: string | null;
+  },
   signal?: AbortSignal,
 ): Promise<Job> {
   const body = new FormData();
   body.append("name", name);
   body.append("max_width", maxWidth.toString());
   body.append("jpeg_quality", jpegQuality.toString());
+  body.append("priority", options.priority);
+  if (options.availableAt !== null) {
+    body.append("available_at", options.availableAt);
+  }
   images.forEach((image) => body.append("images", image, image.name));
 
-  return request<Job>("/api/v1/jobs", {
+  return apiRequest<Job>("/api/v1/jobs", {
     method: "POST",
     body,
     signal,
   });
 }
 
+export function displayJobStatus(job: Job, now = Date.now()): DisplayJobStatus {
+  const availableAt = Date.parse(job.available_at);
+  return job.status === "queued" && Number.isFinite(availableAt) && availableAt > now
+    ? "scheduled"
+    : job.status;
+}
+
 export async function cancelJob(id: number, signal?: AbortSignal): Promise<Job> {
-  return request<Job>(`/api/v1/jobs/${id}/cancel`, {
+  return apiRequest<Job>(`/api/v1/jobs/${id}/cancel`, {
     method: "POST",
     signal,
   });
 }
 
 export async function retryJob(id: number, signal?: AbortSignal): Promise<Job> {
-  return request<Job>(`/api/v1/jobs/${id}/retry`, {
+  return apiRequest<Job>(`/api/v1/jobs/${id}/retry`, {
     method: "POST",
     signal,
   });
@@ -148,7 +168,7 @@ export function artifactDownloadUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
 
-async function request<T>(path: string, init: RequestInit): Promise<T> {
+export async function apiRequest<T>(path: string, init: RequestInit): Promise<T> {
   let response: Response;
 
   try {

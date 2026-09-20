@@ -4,19 +4,22 @@ TaskHarbor is a learning-focused portfolio project for creating, running, and mo
 
 ## Current milestone
 
-Phase 5 makes the `image_resize` pipeline resilient and controllable. Jobs now have bounded automatic retries, cooperative cancellation, safe attempt history, and manual retry as a linked new job.
+Phase 6 adds one-off and recurring scheduling to the resilient `image_resize` pipeline. Jobs can be assigned `high`, `normal`, or `low` priority, while recurring schedules keep an image template and a UTC-anchored fixed interval.
 
 The current request flow is:
 
 1. React sends multipart form data with the job settings and source images.
 2. Axum streams each file to a server-generated storage key while enforcing count and byte limits.
 3. Image headers are inspected to verify JPEG or PNG content, dimensions, megapixels, and the absence of PNG animation before PostgreSQL records the queued job.
-4. The worker claims an eligible `queued` or `retry_waiting` job and creates a numbered attempt before doing work outside Tokio's async threads.
-5. A transient image I/O failure records the attempt and schedules another one with exponential backoff. A permanent input/settings failure, or an exhausted attempt limit, ends the job as `failed`.
-6. A pending job can be cancelled immediately. A running job moves to `cancel_requested`; the worker checks that request between items and before the conditional output publication.
-7. PostgreSQL publishes the complete output manifest only after every item succeeds. The dashboard shows lifecycle actions, retry timing, and the history of each attempt.
+4. A one-off job remains `queued` until `available_at`. The dashboard presents a future queued job as **Scheduled**.
+5. Before claiming work, the worker materializes due recurring slots. Each occurrence snapshots the schedule's settings and input metadata into a new job.
+6. The worker claims the highest-priority eligible job, then orders equal priorities by `available_at` and ID. Priority does not interrupt work that is already running.
+7. A transient image I/O failure records the attempt and schedules another one with exponential backoff. A permanent input/settings failure, or an exhausted attempt limit, ends the job as `failed`.
+8. PostgreSQL publishes the complete output manifest only after every item succeeds. The dashboard shows lifecycle actions, attempt history, schedules, and occurrence history.
 
 The default `max_attempts` is three, including the first attempt. Manual retry leaves a terminal job and its history unchanged, creates a linked job through `retry_of_job_id`, and reuses the same source files.
+
+Recurring intervals range from one minute to one year. If the scheduler was offline, it coalesces missed time into at most the latest due slot and records how many older slots were skipped. A due slot is recorded as `skipped_overlap` when an earlier occurrence from the same schedule is still nonterminal. Schedule edits affect future occurrences only.
 
 Jobs survive API and worker restarts. Crash recovery is intentionally deferred: if the worker dies after a claim, that job remains `running` until it is reset manually in the local demo database. Cancellation is cooperative and cannot interrupt image code already running inside `spawn_blocking`; it takes effect at the next safe boundary.
 
@@ -93,6 +96,10 @@ TaskHarbor API listening on http://127.0.0.1:3000
 | `GET` | `/api/v1/jobs/{id}` | Read one job or return `404` |
 | `POST` | `/api/v1/jobs/{id}/cancel` | Cancel a pending job or request cancellation of a running job |
 | `POST` | `/api/v1/jobs/{id}/retry` | Create a linked retry of a failed or cancelled job |
+| `POST` | `/api/v1/schedules` | Create a recurring image schedule from multipart input |
+| `GET` | `/api/v1/schedules` | List schedules with occurrence history |
+| `GET` | `/api/v1/schedules/{id}` | Read one schedule or return `404` |
+| `PUT` | `/api/v1/schedules/{id}` | Edit future settings or enable/disable a schedule |
 | `GET` | `/api/v1/artifacts/{id}/download` | Download a published JPEG output |
 
 Create a job:
@@ -102,8 +109,23 @@ curl -i -X POST http://127.0.0.1:3000/api/v1/jobs \
   -F "name=resize avatars" \
   -F "max_width=1600" \
   -F "jpeg_quality=85" \
+  -F "priority=high" \
+  -F "available_at=2026-09-20T08:00:00Z" \
   -F "images=@avatar.png" \
   -F "images=@portrait.jpg"
+```
+
+Create an hourly recurring schedule. `anchor_at` and API timestamps use RFC 3339; the dashboard converts local form input to UTC.
+
+```bash
+curl -i -X POST http://127.0.0.1:3000/api/v1/schedules \
+  -F "name=hourly catalog previews" \
+  -F "interval_seconds=3600" \
+  -F "anchor_at=2026-09-20T08:00:00Z" \
+  -F "priority=normal" \
+  -F "max_width=1600" \
+  -F "jpeg_quality=85" \
+  -F "images=@catalog.png"
 ```
 
 Windows PowerShell passes quotes to native programs differently. This equivalent command was verified on Windows:
