@@ -5,13 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+argon2.workspace = true
 axum = { version = "=0.8.9", features = ["multipart"] }
+axum-extra.workspace = true
 serde.workspace = true
+sha2.workspace = true
 taskharbor-adapters = { path = "../../crates/adapters" }
 taskharbor-core = { path = "../../crates/core" }
 time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 image.workspace = true

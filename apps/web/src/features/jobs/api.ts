@@ -91,6 +91,11 @@ interface ErrorEnvelope {
 }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+let csrfToken: string | null = null;
+
+export function setCsrfToken(value: string | null): void {
+  csrfToken = value;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -172,9 +177,18 @@ export function artifactDownloadUrl(path: string): string {
 
 export async function apiRequest<T>(path: string, init: RequestInit): Promise<T> {
   let response: Response;
+  const headers = new Headers(init.headers);
+  const method = (init.method ?? "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken !== null) {
+    headers.set("x-csrf-token", csrfToken);
+  }
 
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, init);
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      credentials: "same-origin",
+      headers,
+    });
   } catch (error) {
     if (isAbortError(error)) {
       throw error;
@@ -197,6 +211,10 @@ export async function apiRequest<T>(path: string, init: RequestInit): Promise<T>
       payload.error?.code ?? null,
       payload.error?.field ?? null,
     );
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   try {

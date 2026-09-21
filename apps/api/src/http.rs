@@ -1,12 +1,14 @@
 use axum::body::Body;
 use axum::extract::multipart::MultipartRejection;
-use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{DefaultBodyLimit, Extension, Multipart, Path, State};
+use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use taskharbor_adapters::{
     ArtifactKind, ArtifactRecord, AttemptRecord, AttemptStatus, JobRecord, JobSettings,
     MAX_OUTPUT_WIDTH, MAX_SCHEDULE_INTERVAL_SECONDS, MAX_TOTAL_FILE_BYTES,
@@ -18,14 +20,18 @@ use time::OffsetDateTime;
 use tokio_util::io::ReaderStream;
 
 use crate::AppState;
+use crate::auth::{self, AuthSession};
 use crate::error::ApiError;
 use crate::upload;
 
 const MULTIPART_OVERHEAD_BYTES: usize = 1024 * 1024;
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let protected = Router::new()
+        .route(
+            "/api/v1/session",
+            get(auth::current_session).delete(auth::logout),
+        )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/{id}", get(get_job))
         .route("/api/v1/jobs/{id}/cancel", post(cancel_job))
@@ -40,6 +46,18 @@ pub fn router(state: AppState) -> Router {
             get(get_schedule).put(update_schedule),
         )
         .route("/api/v1/artifacts/{id}/download", get(download_artifact))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(health))
+        .route("/api/v1/session/login", post(auth::login))
+        .merge(protected)
+        .layer(middleware::from_fn(log_request))
         .layer(DefaultBodyLimit::max(
             usize::try_from(MAX_TOTAL_FILE_BYTES).unwrap_or(25 * 1024 * 1024)
                 + MULTIPART_OVERHEAD_BYTES,
@@ -47,25 +65,82 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn liveness() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
+}
+
 async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {
     state.jobs.ping().await.map_err(ApiError::repository)?;
+    state.storage.ping().await.map_err(ApiError::storage)?;
 
     Ok(Json(HealthResponse { status: "ok" }))
 }
 
+async fn log_request(request: axum::extract::Request, next: middleware::Next) -> Response {
+    let started_at = Instant::now();
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    tracing::info!(
+        event = "http_request",
+        %method,
+        %path,
+        status = response.status().as_u16(),
+        duration_ms = started_at.elapsed().as_millis(),
+    );
+    response
+}
+
 async fn create_job(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
+    headers: HeaderMap,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
-    let job = upload::create_image_job(&state, multipart).await?;
+    state
+        .upload_limiter
+        .check(session.user_id.to_string())
+        .await
+        .map_err(ApiError::rate_limited)?;
+    let idempotency_key = parse_idempotency_key(&headers)?;
+    let job = upload::create_image_job(&state, session.user_id, idempotency_key, multipart).await?;
 
     Ok((StatusCode::CREATED, Json(job.into())))
 }
 
-async fn list_jobs(State(state): State<AppState>) -> Result<Json<ListJobsResponse>, ApiError> {
+fn parse_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    let value = value.to_str().unwrap_or_default().trim();
+    if value.is_empty() || value.len() > 128 {
+        return Err(ApiError::upload_validation(
+            "invalid_idempotency_key",
+            "Idempotency-Key must contain between 1 and 128 visible characters",
+            "idempotency_key",
+        ));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+async fn list_jobs(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
+) -> Result<Json<ListJobsResponse>, ApiError> {
     let jobs = state
         .jobs
-        .list()
+        .list_for_owner(session.user_id)
         .await
         .map_err(ApiError::repository)?
         .into_iter()
@@ -77,6 +152,7 @@ async fn list_jobs(State(state): State<AppState>) -> Result<Json<ListJobsRespons
 
 async fn get_job(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
     Path(raw_id): Path<String>,
 ) -> Result<Json<JobResponse>, ApiError> {
     let id = raw_id
@@ -84,7 +160,7 @@ async fn get_job(
         .map_err(|_| ApiError::job_not_found())?;
     let job = state
         .jobs
-        .get(id)
+        .get_for_owner(id, session.user_id)
         .await
         .map_err(ApiError::repository)?
         .ok_or_else(ApiError::job_not_found)?;
@@ -94,12 +170,13 @@ async fn get_job(
 
 async fn cancel_job(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
     Path(raw_id): Path<String>,
 ) -> Result<Json<JobResponse>, ApiError> {
     let id = parse_job_id(&raw_id)?;
     let job = state
         .jobs
-        .request_cancel(id)
+        .request_cancel_for_owner(id, session.user_id)
         .await
         .map_err(ApiError::repository)?
         .ok_or_else(ApiError::job_not_found)?;
@@ -109,12 +186,13 @@ async fn cancel_job(
 
 async fn retry_job(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
     Path(raw_id): Path<String>,
 ) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
     let id = parse_job_id(&raw_id)?;
     let job = state
         .jobs
-        .manual_retry(id)
+        .manual_retry_for_owner(id, session.user_id)
         .await
         .map_err(ApiError::repository)?
         .ok_or_else(ApiError::job_not_found)?;
@@ -124,18 +202,25 @@ async fn retry_job(
 
 async fn create_schedule(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<(StatusCode, Json<ScheduleResponse>), ApiError> {
-    let schedule = upload::create_schedule(&state, multipart).await?;
+    state
+        .upload_limiter
+        .check(session.user_id.to_string())
+        .await
+        .map_err(ApiError::rate_limited)?;
+    let schedule = upload::create_schedule(&state, session.user_id, multipart).await?;
     Ok((StatusCode::CREATED, Json(schedule.into())))
 }
 
 async fn list_schedules(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
 ) -> Result<Json<ListSchedulesResponse>, ApiError> {
     let schedules = state
         .jobs
-        .list_schedules()
+        .list_schedules_for_owner(session.user_id)
         .await
         .map_err(ApiError::repository)?
         .into_iter()
@@ -146,6 +231,7 @@ async fn list_schedules(
 
 async fn list_workers(
     State(state): State<AppState>,
+    Extension(_session): Extension<AuthSession>,
 ) -> Result<Json<ListWorkersResponse>, ApiError> {
     let workers = state
         .jobs
@@ -160,12 +246,13 @@ async fn list_workers(
 
 async fn get_schedule(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
     Path(raw_id): Path<String>,
 ) -> Result<Json<ScheduleResponse>, ApiError> {
     let id = parse_schedule_id(&raw_id)?;
     let schedule = state
         .jobs
-        .get_schedule(id)
+        .get_schedule_for_owner(id, session.user_id)
         .await
         .map_err(ApiError::repository)?
         .ok_or_else(ApiError::schedule_not_found)?;
@@ -174,6 +261,7 @@ async fn get_schedule(
 
 async fn update_schedule(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
     Path(raw_id): Path<String>,
     Json(request): Json<UpdateScheduleRequest>,
 ) -> Result<Json<ScheduleResponse>, ApiError> {
@@ -181,7 +269,7 @@ async fn update_schedule(
     let request = request.validate()?;
     let schedule = state
         .jobs
-        .update_schedule(id, request)
+        .update_schedule_for_owner(id, request, session.user_id)
         .await
         .map_err(ApiError::repository)?
         .ok_or_else(ApiError::schedule_not_found)?;
@@ -202,6 +290,7 @@ fn parse_schedule_id(raw_id: &str) -> Result<ScheduleId, ApiError> {
 
 async fn download_artifact(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
     Path(raw_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let artifact_id = raw_id
@@ -211,7 +300,7 @@ async fn download_artifact(
         .ok_or_else(ApiError::artifact_not_found)?;
     let artifact = state
         .jobs
-        .get_downloadable_artifact(artifact_id)
+        .get_downloadable_artifact_for_owner(artifact_id, session.user_id)
         .await
         .map_err(ApiError::repository)?
         .ok_or_else(ApiError::artifact_not_found)?;

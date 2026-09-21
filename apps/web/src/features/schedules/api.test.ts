@@ -6,6 +6,7 @@ import {
   updateSchedule,
   type Schedule,
 } from "./api";
+import { setCsrfToken } from "../jobs/api";
 
 const schedule: Schedule = {
   id: 8,
@@ -37,7 +38,10 @@ const schedule: Schedule = {
   updated_at: "2026-09-19T08:00:00Z",
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  setCsrfToken(null);
+  vi.unstubAllGlobals();
+});
 
 describe("schedules API client", () => {
   it("lists, creates, and updates schedules with the documented shapes", async () => {
@@ -47,6 +51,7 @@ describe("schedules API client", () => {
       .mockResolvedValueOnce(jsonResponse(schedule, 201))
       .mockResolvedValueOnce(jsonResponse({ ...schedule, enabled: false }));
     vi.stubGlobal("fetch", fetchMock);
+    setCsrfToken("schedule-csrf");
 
     await expect(listSchedules()).resolves.toEqual([schedule]);
     const image = new File(["png"], "catalog.png", { type: "image/png" });
@@ -66,7 +71,8 @@ describe("schedules API client", () => {
 
     const createInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
     const form = createInit.body as FormData;
-    expect(createInit.headers).toBeUndefined();
+    expect(createInit.credentials).toBe("same-origin");
+    expect((createInit.headers as Headers).has("content-type")).toBe(false);
     expect(form.get("anchor_at")).toBe(schedule.anchor_at);
     expect(form.get("interval_seconds")).toBe("3600");
     expect(form.get("priority")).toBe("high");
@@ -86,8 +92,11 @@ describe("schedules API client", () => {
     expect(fetchMock.mock.calls[2]?.[0]).toBe(`/api/v1/schedules/${schedule.id}`);
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
       method: "PUT",
-      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
     });
+    expect(
+      ((fetchMock.mock.calls[2]?.[1] as RequestInit).headers as Headers).get("content-type"),
+    ).toBe("application/json");
   });
 });
 

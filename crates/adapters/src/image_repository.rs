@@ -4,6 +4,7 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use taskharbor_core::{JobId, JobName, JobPriority};
 use time::OffsetDateTime;
 
+use crate::auth_repository::UserId;
 use crate::image_processing::{MAX_FILES_PER_JOB, MAX_OUTPUT_WIDTH};
 use crate::postgres::{
     ClaimedJob, ClaimedWork, JobRecord, PgJobRepository, RepositoryError, decode_job_id,
@@ -12,12 +13,14 @@ use crate::postgres::{
 
 #[derive(Debug)]
 pub struct NewImageJob {
+    pub owner_user_id: UserId,
     pub name: JobName,
     pub max_width: u32,
     pub jpeg_quality: u8,
     pub available_at: Option<OffsetDateTime>,
     pub priority: JobPriority,
     pub inputs: Vec<NewInputArtifact>,
+    pub idempotency: Option<IdempotencyRequest>,
 }
 
 impl NewImageJob {
@@ -35,8 +38,23 @@ impl NewImageJob {
                 "image settings are outside the supported range".into(),
             ));
         }
+        if let Some(idempotency) = &self.idempotency
+            && (idempotency.key.is_empty()
+                || idempotency.key.len() > 128
+                || idempotency.fingerprint.len() != 32)
+        {
+            return Err(RepositoryError::InvalidData(
+                "idempotency data is outside the supported range".into(),
+            ));
+        }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub struct IdempotencyRequest {
+    pub key: String,
+    pub fingerprint: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -47,6 +65,7 @@ pub struct NewInputArtifact {
     pub byte_size: u64,
     pub width: u32,
     pub height: u32,
+    pub checksum_sha256: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -154,6 +173,42 @@ impl ArtifactKind {
 }
 
 impl PgJobRepository {
+    pub async fn find_idempotent_image_job(
+        &self,
+        owner_user_id: UserId,
+        idempotency: &IdempotencyRequest,
+    ) -> Result<Option<JobRecord>, RepositoryError> {
+        if idempotency.key.is_empty()
+            || idempotency.key.len() > 128
+            || idempotency.fingerprint.len() != 32
+        {
+            return Err(RepositoryError::InvalidData(
+                "idempotency data is outside the supported range".into(),
+            ));
+        }
+        let Some((job_id, fingerprint)) = sqlx::query_as::<_, (i64, Vec<u8>)>(
+            r#"
+            SELECT id, request_fingerprint
+            FROM jobs
+            WHERE owner_user_id = $1 AND idempotency_key = $2
+            "#,
+        )
+        .bind(owner_user_id.get())
+        .bind(&idempotency.key)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        if fingerprint != idempotency.fingerprint {
+            return Err(RepositoryError::IdempotencyConflict);
+        }
+        self.get_for_owner(decode_job_id(job_id)?, owner_user_id)
+            .await?
+            .ok_or(RepositoryError::StateConflict("read idempotent image job"))
+            .map(Some)
+    }
+
     pub async fn create_image_job(
         &self,
         request: NewImageJob,
@@ -165,6 +220,35 @@ impl PgJobRepository {
         let max_width = i32::try_from(request.max_width)
             .map_err(|_| RepositoryError::InvalidData("max width exceeds INTEGER".into()))?;
 
+        if let Some(idempotency) = &request.idempotency {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))")
+                .bind(&idempotency.key)
+                .bind(request.owner_user_id.get())
+                .execute(&mut *transaction)
+                .await?;
+            if let Some((job_id, fingerprint)) = sqlx::query_as::<_, (i64, Vec<u8>)>(
+                r#"
+                SELECT id, request_fingerprint
+                FROM jobs
+                WHERE owner_user_id = $1 AND idempotency_key = $2
+                "#,
+            )
+            .bind(request.owner_user_id.get())
+            .bind(&idempotency.key)
+            .fetch_optional(&mut *transaction)
+            .await?
+            {
+                if fingerprint != idempotency.fingerprint {
+                    return Err(RepositoryError::IdempotencyConflict);
+                }
+                transaction.commit().await?;
+                return self
+                    .get_for_owner(decode_job_id(job_id)?, request.owner_user_id)
+                    .await?
+                    .ok_or(RepositoryError::StateConflict("read idempotent image job"));
+            }
+        }
+
         let job_id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO jobs (
@@ -174,9 +258,12 @@ impl PgJobRepository {
                 priority,
                 progress_total,
                 max_width,
-                jpeg_quality
+                jpeg_quality,
+                owner_user_id,
+                idempotency_key,
+                request_fingerprint
             )
-            VALUES ($1, 'image_resize', COALESCE($2, CURRENT_TIMESTAMP), $3, $4, $5, $6)
+            VALUES ($1, 'image_resize', COALESCE($2, CURRENT_TIMESTAMP), $3, $4, $5, $6, $7, $8, $9)
             RETURNING id
             "#,
         )
@@ -186,6 +273,14 @@ impl PgJobRepository {
         .bind(progress_total)
         .bind(max_width)
         .bind(i16::from(request.jpeg_quality))
+        .bind(request.owner_user_id.get())
+        .bind(request.idempotency.as_ref().map(|value| value.key.as_str()))
+        .bind(
+            request
+                .idempotency
+                .as_ref()
+                .map(|value| value.fingerprint.as_slice()),
+        )
         .fetch_one(&mut *transaction)
         .await?;
 
@@ -212,6 +307,24 @@ impl PgJobRepository {
         &self,
         artifact_id: u64,
     ) -> Result<Option<ArtifactRecord>, RepositoryError> {
+        self.get_downloadable_artifact_with_owner(artifact_id, None)
+            .await
+    }
+
+    pub async fn get_downloadable_artifact_for_owner(
+        &self,
+        artifact_id: u64,
+        owner_user_id: UserId,
+    ) -> Result<Option<ArtifactRecord>, RepositoryError> {
+        self.get_downloadable_artifact_with_owner(artifact_id, Some(owner_user_id))
+            .await
+    }
+
+    async fn get_downloadable_artifact_with_owner(
+        &self,
+        artifact_id: u64,
+        owner_user_id: Option<UserId>,
+    ) -> Result<Option<ArtifactRecord>, RepositoryError> {
         let artifact_id = encode_u64(artifact_id, "artifact ID")?;
         let row = sqlx::query_as::<_, ArtifactRow>(
             r#"
@@ -234,9 +347,11 @@ impl PgJobRepository {
             WHERE artifact.id = $1
               AND artifact.kind = 'output'
               AND job.state = 'succeeded'
+              AND ($2::BIGINT IS NULL OR job.owner_user_id = $2)
             "#,
         )
         .bind(artifact_id)
+        .bind(owner_user_id.map(UserId::get))
         .fetch_optional(&self.pool)
         .await?;
 
@@ -491,8 +606,9 @@ async fn insert_input_artifact(
             byte_size,
             width,
             height
+            , checksum_sha256
         )
-        VALUES ($1, 'input', $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, 'input', $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(job_id)
@@ -509,6 +625,7 @@ async fn insert_input_artifact(
         i32::try_from(input.height)
             .map_err(|_| RepositoryError::InvalidData("input height exceeds INTEGER".into()))?,
     )
+    .bind(input.checksum_sha256)
     .execute(&mut **transaction)
     .await?;
     Ok(())

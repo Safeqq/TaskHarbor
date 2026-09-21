@@ -2,6 +2,7 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use taskharbor_core::{JobId, JobName, JobPriority, JobStatus, ScheduleId};
 use time::{Duration, OffsetDateTime};
 
+use crate::auth_repository::UserId;
 use crate::image_processing::{MAX_FILES_PER_JOB, MAX_OUTPUT_WIDTH};
 use crate::image_repository::NewInputArtifact;
 use crate::postgres::{
@@ -15,6 +16,7 @@ const OVERLAP_REASON: &str = "previous occurrence is still active";
 
 #[derive(Debug)]
 pub struct NewSchedule {
+    pub owner_user_id: UserId,
     pub name: JobName,
     pub interval_seconds: u32,
     pub anchor_at: OffsetDateTime,
@@ -303,8 +305,9 @@ impl PgJobRepository {
                 priority,
                 max_width,
                 jpeg_quality
+                , owner_user_id
             )
-            VALUES ($1, $2, $3, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $3, $4, $5, $6, $7)
             RETURNING id
             "#,
         )
@@ -314,6 +317,7 @@ impl PgJobRepository {
         .bind(request.priority.as_str())
         .bind(encode_u32(request.max_width, "schedule max width")?)
         .bind(i16::from(request.jpeg_quality))
+        .bind(request.owner_user_id.get())
         .fetch_one(&mut *transaction)
         .await?;
 
@@ -336,6 +340,20 @@ impl PgJobRepository {
     }
 
     pub async fn list_schedules(&self) -> Result<Vec<ScheduleRecord>, RepositoryError> {
+        self.list_schedules_with_owner(None).await
+    }
+
+    pub async fn list_schedules_for_owner(
+        &self,
+        owner_user_id: UserId,
+    ) -> Result<Vec<ScheduleRecord>, RepositoryError> {
+        self.list_schedules_with_owner(Some(owner_user_id)).await
+    }
+
+    async fn list_schedules_with_owner(
+        &self,
+        owner_user_id: Option<UserId>,
+    ) -> Result<Vec<ScheduleRecord>, RepositoryError> {
         let rows = sqlx::query_as::<_, ScheduleRow>(
             r#"
             SELECT
@@ -351,9 +369,11 @@ impl PgJobRepository {
                 created_at,
                 updated_at
             FROM schedules
+            WHERE $1::BIGINT IS NULL OR owner_user_id = $1
             ORDER BY id
             "#,
         )
+        .bind(owner_user_id.map(UserId::get))
         .fetch_all(&self.pool)
         .await?;
 
@@ -369,6 +389,22 @@ impl PgJobRepository {
     pub async fn get_schedule(
         &self,
         id: ScheduleId,
+    ) -> Result<Option<ScheduleRecord>, RepositoryError> {
+        self.get_schedule_with_owner(id, None).await
+    }
+
+    pub async fn get_schedule_for_owner(
+        &self,
+        id: ScheduleId,
+        owner_user_id: UserId,
+    ) -> Result<Option<ScheduleRecord>, RepositoryError> {
+        self.get_schedule_with_owner(id, Some(owner_user_id)).await
+    }
+
+    async fn get_schedule_with_owner(
+        &self,
+        id: ScheduleId,
+        owner_user_id: Option<UserId>,
     ) -> Result<Option<ScheduleRecord>, RepositoryError> {
         let raw_id = encode_schedule_id(id)?;
         let row = sqlx::query_as::<_, ScheduleRow>(
@@ -387,9 +423,11 @@ impl PgJobRepository {
                 updated_at
             FROM schedules
             WHERE id = $1
+              AND ($2::BIGINT IS NULL OR owner_user_id = $2)
             "#,
         )
         .bind(raw_id)
+        .bind(owner_user_id.map(UserId::get))
         .fetch_optional(&self.pool)
         .await?;
 
@@ -409,7 +447,21 @@ impl PgJobRepository {
         let as_of = sqlx::query_scalar::<_, OffsetDateTime>("SELECT CURRENT_TIMESTAMP")
             .fetch_one(&self.pool)
             .await?;
-        self.update_schedule_at(id, request, as_of).await
+        self.update_schedule_at_with_owner(id, request, as_of, None)
+            .await
+    }
+
+    pub async fn update_schedule_for_owner(
+        &self,
+        id: ScheduleId,
+        request: UpdateSchedule,
+        owner_user_id: UserId,
+    ) -> Result<Option<ScheduleRecord>, RepositoryError> {
+        let as_of = sqlx::query_scalar::<_, OffsetDateTime>("SELECT CURRENT_TIMESTAMP")
+            .fetch_one(&self.pool)
+            .await?;
+        self.update_schedule_at_with_owner(id, request, as_of, Some(owner_user_id))
+            .await
     }
 
     pub async fn update_schedule_at(
@@ -417,6 +469,17 @@ impl PgJobRepository {
         id: ScheduleId,
         request: UpdateSchedule,
         as_of: OffsetDateTime,
+    ) -> Result<Option<ScheduleRecord>, RepositoryError> {
+        self.update_schedule_at_with_owner(id, request, as_of, None)
+            .await
+    }
+
+    async fn update_schedule_at_with_owner(
+        &self,
+        id: ScheduleId,
+        request: UpdateSchedule,
+        as_of: OffsetDateTime,
+        owner_user_id: Option<UserId>,
     ) -> Result<Option<ScheduleRecord>, RepositoryError> {
         request.validate()?;
         let raw_id = encode_schedule_id(id)?;
@@ -434,6 +497,7 @@ impl PgJobRepository {
                 jpeg_quality = $9,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
+              AND ($10::BIGINT IS NULL OR owner_user_id = $10)
             "#,
         )
         .bind(raw_id)
@@ -445,13 +509,17 @@ impl PgJobRepository {
         .bind(request.priority.as_str())
         .bind(encode_u32(request.max_width, "schedule max width")?)
         .bind(i16::from(request.jpeg_quality))
+        .bind(owner_user_id.map(UserId::get))
         .execute(&self.pool)
         .await?;
 
         if updated.rows_affected() == 0 {
             return Ok(None);
         }
-        self.get_schedule(id).await
+        match owner_user_id {
+            Some(owner_user_id) => self.get_schedule_for_owner(id, owner_user_id).await,
+            None => self.get_schedule(id).await,
+        }
     }
 
     pub async fn materialize_next_schedule(&self) -> Result<Option<ScheduleTick>, RepositoryError> {
@@ -476,6 +544,7 @@ impl PgJobRepository {
                 schedule.priority,
                 schedule.max_width,
                 schedule.jpeg_quality,
+                schedule.owner_user_id,
                 (
                     SELECT COUNT(*)
                     FROM schedule_inputs AS input
@@ -540,8 +609,9 @@ impl PgJobRepository {
                     priority,
                     schedule_id,
                     scheduled_for
+                    , owner_user_id
                 )
-                VALUES ($1, 'image_resize', $2, $3, $4, $5, $6, $7, $2)
+                VALUES ($1, 'image_resize', $2, $3, $4, $5, $6, $7, $2, $8)
                 RETURNING id
                 "#,
             )
@@ -552,6 +622,7 @@ impl PgJobRepository {
             .bind(candidate.jpeg_quality)
             .bind(&candidate.priority)
             .bind(candidate.id)
+            .bind(candidate.owner_user_id)
             .fetch_one(&mut *transaction)
             .await?;
 
@@ -566,7 +637,8 @@ impl PgJobRepository {
                     media_type,
                     byte_size,
                     width,
-                    height
+                    height,
+                    checksum_sha256
                 )
                 SELECT
                     $2,
@@ -577,7 +649,8 @@ impl PgJobRepository {
                     media_type,
                     byte_size,
                     width,
-                    height
+                    height,
+                    checksum_sha256
                 FROM schedule_inputs
                 WHERE schedule_id = $1
                 ORDER BY item_index
@@ -668,9 +741,10 @@ async fn insert_schedule_input(
             media_type,
             byte_size,
             width,
-            height
+            height,
+            checksum_sha256
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(schedule_id)
@@ -681,6 +755,7 @@ async fn insert_schedule_input(
     .bind(encode_u64(input.byte_size, "schedule input byte size")?)
     .bind(encode_u32(input.width, "schedule input width")?)
     .bind(encode_u32(input.height, "schedule input height")?)
+    .bind(input.checksum_sha256)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -862,6 +937,7 @@ struct ScheduleCandidateRow {
     priority: String,
     max_width: i32,
     jpeg_quality: i16,
+    owner_user_id: i64,
     input_count: i64,
 }
 

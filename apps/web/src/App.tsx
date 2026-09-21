@@ -15,6 +15,8 @@ import {
 } from "./features/jobs/useJobs";
 import { SchedulesPage } from "./features/schedules/SchedulesPage";
 import { WorkersPage } from "./features/workers/WorkersPage";
+import { LoginPage } from "./features/session/LoginPage";
+import { useSession } from "./features/session/useSession";
 
 interface AppProps {
   pollIntervalMs?: number;
@@ -32,6 +34,33 @@ const statuses: DisplayJobStatus[] = [
 ];
 
 export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppProps) {
+  const { session, isLoading, error, signIn, signOut } = useSession();
+
+  if (isLoading) {
+    return <main className="login-page" role="status">Loading TaskHarbor…</main>;
+  }
+  if (session === null) {
+    return <LoginPage initialError={error} onLogin={signIn} />;
+  }
+  return (
+    <Dashboard
+      pollIntervalMs={pollIntervalMs}
+      username={session.user.username}
+      onLogout={signOut}
+    />
+  );
+}
+
+interface DashboardProps extends AppProps {
+  username: string;
+  onLogout: () => Promise<void>;
+}
+
+function Dashboard({
+  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+  username,
+  onLogout,
+}: DashboardProps) {
   const {
     jobs,
     hasLoaded,
@@ -135,6 +164,10 @@ export default function App({ pollIntervalMs = DEFAULT_POLL_INTERVAL_MS }: AppPr
           </button>
         </nav>
         <div className="topbar__context">
+          <span className="environment-label">{username}</span>
+          <button className="topbar__logout" type="button" onClick={() => void onLogout()}>
+            Sign out
+          </button>
           <span className="environment-label">Local workspace</span>
           <span className={`connection-pill${error ? " connection-pill--error" : ""}`}>
             <span aria-hidden="true" />

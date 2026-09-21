@@ -28,6 +28,9 @@ describe("workers API client", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(listWorkers()).resolves.toEqual([worker]);
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/workers", { signal: undefined });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/workers",
+      expect.objectContaining({ credentials: "same-origin", signal: undefined }),
+    );
   });
 });

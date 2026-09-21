@@ -6,7 +6,7 @@ use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sqlx::PgPool;
 use taskharbor_adapters::{
     AttemptStatus, ImageService, JobRecord, LocalStorage, NewImageJob, NewInputArtifact,
-    PgJobRepository, RepositoryError, WorkerId, WorkerRegistration,
+    OWNER_USER_ID, PgJobRepository, RepositoryError, WorkerId, WorkerRegistration,
 };
 use taskharbor_core::{JobName, JobPriority, JobStatus};
 use taskharbor_worker::{process_claimed, process_next, run};
@@ -142,16 +142,19 @@ async fn fails_the_whole_job_without_publishing_partial_outputs() {
             byte_size: u64::try_from(source.len()).expect("test PNG size should fit u64"),
             width: 4,
             height: 2,
+            checksum_sha256: vec![0; 32],
         });
     }
     let job = repository
         .create_image_job(NewImageJob {
+            owner_user_id: OWNER_USER_ID,
             name: JobName::new("partial output guard").expect("test name should be valid"),
             max_width: 2,
             jpeg_quality: 85,
             available_at: None,
             priority: JobPriority::Normal,
             inputs,
+            idempotency: None,
         })
         .await
         .expect("image job should be created");
@@ -472,6 +475,7 @@ async fn create_image_fixture(
     drop(file);
     let job = repository
         .create_image_job(NewImageJob {
+            owner_user_id: OWNER_USER_ID,
             name: JobName::new(name).expect("test name should be valid"),
             max_width: 2,
             jpeg_quality: 85,
@@ -484,7 +488,9 @@ async fn create_image_fixture(
                 byte_size: u64::try_from(source.len()).expect("test PNG size should fit u64"),
                 width: 4,
                 height: 2,
+                checksum_sha256: vec![0; 32],
             }],
+            idempotency: None,
         })
         .await
         .expect("image job should be created");

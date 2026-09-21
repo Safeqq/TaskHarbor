@@ -1,12 +1,14 @@
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use taskharbor_adapters::{
-    ClaimedJob, ClaimedWork, FailureDisposition, ImageService, LocalStorage, PendingOutputArtifact,
-    PgJobRepository, ReclaimDisposition, RepositoryError, WorkerId, WorkerRegistration,
+    ClaimedJob, ClaimedWork, FailureDisposition, FailureKind, ImageService, LocalStorage,
+    PendingOutputArtifact, PgJobRepository, ReclaimDisposition, RepositoryError, WorkerId,
+    WorkerRegistration,
 };
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval, sleep, sleep_until};
+use tracing::{debug, error, info, warn};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub const DEFAULT_WORKER_CONCURRENCY: usize = 2;
@@ -15,6 +17,10 @@ pub const DEFAULT_LEASE_RENEWAL_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 pub const DEFAULT_HEARTBEAT_TTL: Duration = Duration::from_secs(10);
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+pub const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const DEFAULT_OUTPUT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const DEFAULT_ORPHAN_GRACE: Duration = Duration::from_secs(60 * 60);
+pub const DEFAULT_STORAGE_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -26,6 +32,10 @@ pub struct WorkerConfig {
     pub heartbeat_interval: Duration,
     pub heartbeat_ttl: Duration,
     pub shutdown_grace: Duration,
+    pub maintenance_interval: Duration,
+    pub output_retention: Duration,
+    pub orphan_grace: Duration,
+    pub storage_budget_bytes: u64,
 }
 
 impl WorkerConfig {
@@ -39,6 +49,10 @@ impl WorkerConfig {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             heartbeat_ttl: DEFAULT_HEARTBEAT_TTL,
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
+            maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
+            output_retention: DEFAULT_OUTPUT_RETENTION,
+            orphan_grace: DEFAULT_ORPHAN_GRACE,
+            storage_budget_bytes: DEFAULT_STORAGE_BUDGET_BYTES,
         }
     }
 
@@ -58,6 +72,15 @@ impl WorkerConfig {
         if self.shutdown_grace.is_zero() {
             return Err(RepositoryError::InvalidData(
                 "shutdown grace period must be greater than zero".into(),
+            ));
+        }
+        if self.maintenance_interval.is_zero()
+            || self.output_retention.is_zero()
+            || self.orphan_grace.is_zero()
+            || self.storage_budget_bytes == 0
+        {
+            return Err(RepositoryError::InvalidData(
+                "maintenance intervals and storage budget must be greater than zero".into(),
             ));
         }
         Ok(())
@@ -109,15 +132,25 @@ pub async fn run_with_config(
 ) -> Result<(), RepositoryError> {
     config.validate()?;
     repository.register_worker(&config.registration()).await?;
-    println!(
-        "TaskHarbor worker {} ({}) registered with concurrency {}",
-        config.name, config.id, config.concurrency_limit
+    info!(
+        event = "worker_registered",
+        worker_id = %config.id,
+        worker_name = %config.name,
+        concurrency = config.concurrency_limit,
+        "worker registered"
     );
+
+    if let Err(error) = run_maintenance(&repository, &storage, &config).await {
+        warn!(%error, "initial maintenance failed");
+    }
 
     let mut tasks = JoinSet::new();
     let mut heartbeat = interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     heartbeat.tick().await;
+    let mut maintenance = interval(config.maintenance_interval);
+    maintenance.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    maintenance.tick().await;
 
     let loop_result = worker_loop(
         &repository,
@@ -127,6 +160,7 @@ pub async fn run_with_config(
         &config,
         &mut tasks,
         &mut heartbeat,
+        &mut maintenance,
     )
     .await;
 
@@ -140,7 +174,7 @@ pub async fn run_with_config(
     )
     .await;
     let stop_result = repository.stop_worker(config.id).await;
-    println!("TaskHarbor worker {} stopped", config.id);
+    info!(event = "worker_stopped", worker_id = %config.id, "worker stopped");
 
     loop_result?;
     drain_result?;
@@ -156,10 +190,11 @@ async fn worker_loop(
     config: &WorkerConfig,
     tasks: &mut JoinSet<Result<(), RepositoryError>>,
     heartbeat: &mut tokio::time::Interval,
+    maintenance: &mut tokio::time::Interval,
 ) -> Result<(), RepositoryError> {
     loop {
         if *shutdown.borrow() {
-            println!("Worker {} stopped accepting new jobs", config.id);
+            info!(worker_id = %config.id, "worker stopped accepting new jobs");
             return Ok(());
         }
 
@@ -167,16 +202,19 @@ async fn worker_loop(
 
         if let Some(tick) = repository.materialize_next_schedule().await? {
             match tick.job_id() {
-                Some(job_id) => println!(
-                    "Scheduler created job {job_id} for schedule {} at {} ({} older slots coalesced)",
-                    tick.schedule_id(),
-                    tick.scheduled_for(),
-                    tick.coalesced_slots()
+                Some(job_id) => info!(
+                    event = "schedule_materialized",
+                    %job_id,
+                    schedule_id = %tick.schedule_id(),
+                    scheduled_for = %tick.scheduled_for(),
+                    coalesced_slots = tick.coalesced_slots(),
+                    "scheduler created job"
                 ),
-                None => println!(
-                    "Scheduler skipped schedule {} at {} because an earlier occurrence is active",
-                    tick.schedule_id(),
-                    tick.scheduled_for()
+                None => info!(
+                    event = "schedule_overlap_skipped",
+                    schedule_id = %tick.schedule_id(),
+                    scheduled_for = %tick.scheduled_for(),
+                    "scheduler skipped active overlap"
                 ),
             }
             continue;
@@ -186,27 +224,38 @@ async fn worker_loop(
             let Some(claimed) = repository.claim_next(config.id).await? else {
                 break;
             };
-            println!(
-                "Worker {} claimed job {} with attempt ID {} and lease through {}",
-                config.id,
-                claimed.job_id(),
-                claimed.attempt_id(),
-                claimed.lease_expires_at()
+            info!(
+                event = "job_claimed",
+                worker_id = %config.id,
+                job_id = %claimed.job_id(),
+                attempt_id = claimed.attempt_id(),
+                attempt_number = claimed.attempt_number(),
+                queue_wait_ms = claimed.queue_wait().as_millis(),
+                lease_expires_at = %claimed.lease_expires_at(),
+                "worker claimed job"
             );
             let repository = repository.clone();
             let images = images.clone();
             let storage = storage.clone();
             let renewal_interval = config.lease_renewal_interval;
+            let storage_budget_bytes = config.storage_budget_bytes;
             tasks.spawn(async move {
-                process_with_lease_renewal(repository, images, storage, claimed, renewal_interval)
-                    .await
+                process_with_lease_renewal(
+                    repository,
+                    images,
+                    storage,
+                    claimed,
+                    renewal_interval,
+                    storage_budget_bytes,
+                )
+                .await
             });
         }
 
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    println!("Worker {} stopped accepting new jobs", config.id);
+                    info!(worker_id = %config.id, "worker stopped accepting new jobs");
                     return Ok(());
                 }
             }
@@ -215,6 +264,11 @@ async fn worker_loop(
             }
             _ = heartbeat.tick() => {
                 repository.heartbeat_worker(config.id, config.heartbeat_ttl).await?;
+            }
+            _ = maintenance.tick() => {
+                if let Err(error) = run_maintenance(repository, storage, config).await {
+                    warn!(%error, worker_id = %config.id, "scheduled maintenance failed");
+                }
             }
             () = sleep(POLL_INTERVAL) => {}
         }
@@ -227,11 +281,18 @@ async fn process_with_lease_renewal(
     storage: LocalStorage,
     claimed: ClaimedJob,
     renewal_interval: Duration,
+    storage_budget_bytes: u64,
 ) -> Result<(), RepositoryError> {
     let mut renewal = interval(renewal_interval);
     renewal.set_missed_tick_behavior(MissedTickBehavior::Delay);
     renewal.tick().await;
-    let processing = process_claimed_inner(&repository, &images, &storage, &claimed);
+    let processing = process_claimed_inner(
+        &repository,
+        &images,
+        &storage,
+        &claimed,
+        storage_budget_bytes,
+    );
     tokio::pin!(processing);
 
     let result = loop {
@@ -239,23 +300,27 @@ async fn process_with_lease_renewal(
             result = &mut processing => break result,
             _ = renewal.tick() => {
                 match repository.renew_lease(&claimed).await {
-                    Ok(lease_expires_at) => println!(
-                        "Worker {} renewed job {} attempt {} through {}",
-                        claimed.worker_id(),
-                        claimed.job_id(),
-                        claimed.attempt_number(),
-                        lease_expires_at
+                    Ok(lease_expires_at) => debug!(
+                        event = "lease_renewed",
+                        worker_id = %claimed.worker_id(),
+                        job_id = %claimed.job_id(),
+                        attempt_id = claimed.attempt_id(),
+                        attempt_number = claimed.attempt_number(),
+                        lease_expires_at = %lease_expires_at,
+                        "attempt lease renewed"
                     ),
                     Err(RepositoryError::ClaimLost) => {
                         let result = processing.await;
                         break result.and(Err(RepositoryError::ClaimLost));
                     }
                     Err(error) => {
-                        eprintln!(
-                            "Worker {} could not renew job {} attempt {}: {error}",
-                            claimed.worker_id(),
-                            claimed.job_id(),
-                            claimed.attempt_number()
+                        warn!(
+                            %error,
+                            worker_id = %claimed.worker_id(),
+                            job_id = %claimed.job_id(),
+                            attempt_id = claimed.attempt_id(),
+                            attempt_number = claimed.attempt_number(),
+                            "attempt lease could not be renewed"
                         );
                     }
                 }
@@ -278,15 +343,16 @@ async fn drain_tasks(
         return Ok(());
     }
 
-    println!(
-        "Worker {worker_id} is draining {} active job(s) for up to {} seconds",
-        tasks.len(),
-        grace.as_secs()
+    info!(
+        %worker_id,
+        active_jobs = tasks.len(),
+        grace_seconds = grace.as_secs(),
+        "worker draining active jobs"
     );
     let deadline = TokioInstant::now() + grace;
     loop {
         if tasks.is_empty() {
-            println!("Worker {worker_id} drained all active jobs");
+            info!(%worker_id, "worker drained all active jobs");
             return Ok(());
         }
 
@@ -305,9 +371,7 @@ async fn drain_tasks(
                         return Err(join_error(error));
                     }
                 }
-                println!(
-                    "Worker {worker_id} ended {abandoned} task(s) after the shutdown grace period"
-                );
+                warn!(%worker_id, abandoned, "worker ended tasks after shutdown grace period");
                 return Ok(());
             }
         }
@@ -336,34 +400,99 @@ async fn reclaim_expired_attempts(
         let prefix =
             storage.attempt_output_prefix(reclaimed.job_id().get(), reclaimed.attempt_id());
         if let Err(error) = storage.remove_tree(&prefix).await {
-            eprintln!(
-                "Could not clean expired output for job {} attempt {}: {error}",
-                reclaimed.job_id(),
-                reclaimed.attempt_id()
+            error!(
+                %error,
+                job_id = %reclaimed.job_id(),
+                attempt_id = reclaimed.attempt_id(),
+                "expired attempt output could not be cleaned"
             );
         }
         match reclaimed.disposition() {
-            ReclaimDisposition::RetryScheduled { available_at } => println!(
-                "Reclaimed job {} attempt {} from worker {}; retry available at {}",
-                reclaimed.job_id(),
-                reclaimed.attempt_id(),
-                reclaimed.worker_id(),
-                available_at
+            ReclaimDisposition::RetryScheduled { available_at } => warn!(
+                event = "expired_attempt_reclaimed",
+                job_id = %reclaimed.job_id(),
+                attempt_id = reclaimed.attempt_id(),
+                worker_id = %reclaimed.worker_id(),
+                disposition = "retry_scheduled",
+                available_at = %available_at,
+                "expired attempt reclaimed"
             ),
-            ReclaimDisposition::Failed => println!(
-                "Reclaimed job {} attempt {} from worker {}; retry limit exhausted",
-                reclaimed.job_id(),
-                reclaimed.attempt_id(),
-                reclaimed.worker_id()
+            ReclaimDisposition::Failed => warn!(
+                event = "expired_attempt_reclaimed",
+                job_id = %reclaimed.job_id(),
+                attempt_id = reclaimed.attempt_id(),
+                worker_id = %reclaimed.worker_id(),
+                disposition = "failed",
+                "expired attempt reclaimed"
             ),
-            ReclaimDisposition::Cancelled => println!(
-                "Reclaimed and cancelled job {} attempt {} from worker {}",
-                reclaimed.job_id(),
-                reclaimed.attempt_id(),
-                reclaimed.worker_id()
+            ReclaimDisposition::Cancelled => warn!(
+                event = "expired_attempt_reclaimed",
+                job_id = %reclaimed.job_id(),
+                attempt_id = reclaimed.attempt_id(),
+                worker_id = %reclaimed.worker_id(),
+                disposition = "cancelled",
+                "expired attempt reclaimed"
             ),
         }
     }
+    Ok(())
+}
+
+async fn run_maintenance(
+    repository: &PgJobRepository,
+    storage: &LocalStorage,
+    config: &WorkerConfig,
+) -> Result<(), String> {
+    let expired = repository
+        .expire_output_artifacts(config.output_retention)
+        .await
+        .map_err(|error| error.to_string())?;
+    for key in &expired {
+        if let Err(storage_error) = storage.remove_file(key).await {
+            warn!(%storage_error, storage_key = %key, "expired output file could not be removed");
+        }
+    }
+
+    let references = repository
+        .storage_references()
+        .await
+        .map_err(|error| error.to_string())?;
+    let protected_prefixes = repository
+        .active_attempt_output_prefixes()
+        .await
+        .map_err(|error| error.to_string())?;
+    let cutoff = SystemTime::now()
+        .checked_sub(config.orphan_grace)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let cleaned = storage
+        .cleanup_unreferenced(references, protected_prefixes, cutoff)
+        .await
+        .map_err(|error| error.to_string())?;
+    let sessions_purged = repository
+        .purge_expired_sessions()
+        .await
+        .map_err(|error| error.to_string())?;
+    let queue = repository
+        .queue_metrics()
+        .await
+        .map_err(|error| error.to_string())?;
+    let storage_bytes = storage
+        .usage_bytes()
+        .await
+        .map_err(|error| error.to_string())?;
+    info!(
+        event = "maintenance_completed",
+        worker_id = %config.id,
+        queue_depth = queue.depth,
+        oldest_queue_wait_ms = queue.oldest_wait_ms,
+        expired_outputs = expired.len(),
+        orphan_files_removed = cleaned.files_removed,
+        orphan_bytes_removed = cleaned.bytes_removed,
+        sessions_purged,
+        storage_bytes,
+        storage_budget_bytes = config.storage_budget_bytes,
+        "worker maintenance completed"
+    );
     Ok(())
 }
 
@@ -401,7 +530,7 @@ pub async fn process_claimed(
     storage: &LocalStorage,
     claimed: ClaimedJob,
 ) -> Result<(), RepositoryError> {
-    let result = process_claimed_inner(repository, images, storage, &claimed).await;
+    let result = process_claimed_inner(repository, images, storage, &claimed, u64::MAX).await;
     finish_claimed_result(storage, &claimed, result).await
 }
 
@@ -412,11 +541,13 @@ async fn finish_claimed_result(
 ) -> Result<(), RepositoryError> {
     if matches!(&result, Err(RepositoryError::ClaimLost)) {
         cleanup_attempt_outputs(storage, claimed).await;
-        println!(
-            "Worker {} discarded stale output for job {} attempt {}",
-            claimed.worker_id(),
-            claimed.job_id(),
-            claimed.attempt_number()
+        warn!(
+            event = "stale_output_discarded",
+            worker_id = %claimed.worker_id(),
+            job_id = %claimed.job_id(),
+            attempt_id = claimed.attempt_id(),
+            attempt_number = claimed.attempt_number(),
+            "worker discarded stale output"
         );
         return Ok(());
     }
@@ -428,6 +559,7 @@ async fn process_claimed_inner(
     images: &ImageService,
     storage: &LocalStorage,
     claimed: &ClaimedJob,
+    storage_budget_bytes: u64,
 ) -> Result<(), RepositoryError> {
     let started_at = Instant::now();
     match claimed.work().clone() {
@@ -462,15 +594,20 @@ async fn process_claimed_inner(
                 max_width,
                 jpeg_quality,
                 started_at,
+                storage_budget_bytes,
             )
             .await?;
         }
     }
 
-    println!(
-        "Worker finished attempt {} for job {}",
-        claimed.attempt_number(),
-        claimed.job_id()
+    info!(
+        event = "attempt_finished",
+        job_id = %claimed.job_id(),
+        attempt_id = claimed.attempt_id(),
+        attempt_number = claimed.attempt_number(),
+        worker_id = %claimed.worker_id(),
+        duration_ms = started_at.elapsed().as_millis(),
+        "worker finished attempt"
     );
     Ok(())
 }
@@ -485,6 +622,7 @@ async fn process_images(
     max_width: u32,
     jpeg_quality: u8,
     started_at: Instant,
+    storage_budget_bytes: u64,
 ) -> Result<(), RepositoryError> {
     let mut outputs = Vec::with_capacity(inputs.len());
 
@@ -500,45 +638,56 @@ async fn process_images(
             .await
         {
             Ok(processed) => processed,
-            Err(error) => {
-                eprintln!(
-                    "Worker failed image job {} on item {}: {error}",
-                    claimed.job_id(),
-                    input.item_index()
+            Err(image_error) => {
+                warn!(
+                    event = "image_processing_failed",
+                    job_id = %claimed.job_id(),
+                    attempt_id = claimed.attempt_id(),
+                    item_index = input.item_index(),
+                    error = %image_error,
+                    "image item failed"
                 );
-                cleanup_attempt_outputs(storage, claimed).await;
-                let failure = repository
-                    .record_failure(
-                        claimed,
-                        started_at.elapsed(),
-                        error.failure_kind(),
-                        error.safe_message(),
-                    )
-                    .await;
-                match failure {
-                    Ok(FailureDisposition::RetryScheduled { available_at }) => println!(
-                        "Worker scheduled attempt {} for job {} after {}",
-                        claimed.attempt_number() + 1,
-                        claimed.job_id(),
-                        available_at
-                    ),
-                    Ok(FailureDisposition::Failed) => println!(
-                        "Worker permanently failed job {} on attempt {}",
-                        claimed.job_id(),
-                        claimed.attempt_number()
-                    ),
-                    Err(error @ RepositoryError::StateConflict(_)) => {
-                        if !finish_if_cancel_requested(repository, storage, claimed, started_at)
-                            .await?
-                        {
-                            return Err(error);
-                        }
-                    }
-                    Err(error) => return Err(error),
-                }
+                record_image_failure(
+                    repository,
+                    storage,
+                    claimed,
+                    started_at,
+                    image_error.failure_kind(),
+                    image_error.safe_message(),
+                )
+                .await?;
                 return Ok(());
             }
         };
+
+        match storage.usage_bytes().await {
+            Ok(usage) if usage > storage_budget_bytes => {
+                record_image_failure(
+                    repository,
+                    storage,
+                    claimed,
+                    started_at,
+                    FailureKind::Permanent,
+                    "storage budget exceeded while writing output",
+                )
+                .await?;
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(storage_error) => {
+                warn!(%storage_error, "could not measure storage usage");
+                record_image_failure(
+                    repository,
+                    storage,
+                    claimed,
+                    started_at,
+                    FailureKind::Transient,
+                    "storage usage could not be measured",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
 
         if finish_if_cancel_requested(repository, storage, claimed, started_at).await? {
             return Ok(());
@@ -592,6 +741,50 @@ async fn process_images(
     }
 }
 
+async fn record_image_failure(
+    repository: &PgJobRepository,
+    storage: &LocalStorage,
+    claimed: &ClaimedJob,
+    started_at: Instant,
+    kind: FailureKind,
+    message: &str,
+) -> Result<(), RepositoryError> {
+    cleanup_attempt_outputs(storage, claimed).await;
+    let failure = repository
+        .record_failure(claimed, started_at.elapsed(), kind, message)
+        .await;
+    match failure {
+        Ok(FailureDisposition::RetryScheduled { available_at }) => info!(
+            event = "attempt_retry_scheduled",
+            job_id = %claimed.job_id(),
+            attempt_id = claimed.attempt_id(),
+            attempt_number = claimed.attempt_number(),
+            worker_id = %claimed.worker_id(),
+            duration_ms = started_at.elapsed().as_millis(),
+            available_at = %available_at,
+            failure_kind = kind.as_str(),
+            "job retry scheduled"
+        ),
+        Ok(FailureDisposition::Failed) => warn!(
+            event = "attempt_failed",
+            job_id = %claimed.job_id(),
+            attempt_id = claimed.attempt_id(),
+            attempt_number = claimed.attempt_number(),
+            worker_id = %claimed.worker_id(),
+            duration_ms = started_at.elapsed().as_millis(),
+            failure_kind = kind.as_str(),
+            "job permanently failed"
+        ),
+        Err(error @ RepositoryError::StateConflict(_)) => {
+            if !finish_if_cancel_requested(repository, storage, claimed, started_at).await? {
+                return Err(error);
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
 async fn finish_if_cancel_requested(
     repository: &PgJobRepository,
     storage: &LocalStorage,
@@ -606,10 +799,14 @@ async fn finish_if_cancel_requested(
     repository
         .finish_cancelled(claimed, started_at.elapsed())
         .await?;
-    println!(
-        "Worker cancelled job {} after attempt {} reached a safe boundary",
-        claimed.job_id(),
-        claimed.attempt_number()
+    info!(
+        event = "attempt_cancelled",
+        job_id = %claimed.job_id(),
+        attempt_id = claimed.attempt_id(),
+        attempt_number = claimed.attempt_number(),
+        worker_id = %claimed.worker_id(),
+        duration_ms = started_at.elapsed().as_millis(),
+        "worker cancelled job at safe boundary"
     );
     Ok(true)
 }
@@ -617,9 +814,11 @@ async fn finish_if_cancel_requested(
 async fn cleanup_attempt_outputs(storage: &LocalStorage, claimed: &ClaimedJob) {
     let prefix = storage.attempt_output_prefix(claimed.job_id().get(), claimed.attempt_id());
     if let Err(error) = storage.remove_tree(&prefix).await {
-        eprintln!(
-            "Worker could not clean attempt output for job {}: {error}",
-            claimed.job_id()
+        error!(
+            %error,
+            job_id = %claimed.job_id(),
+            attempt_id = claimed.attempt_id(),
+            "attempt output could not be cleaned"
         );
     }
 }

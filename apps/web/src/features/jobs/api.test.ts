@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, cancelJob, createImageJob, listJobs, retryJob, type Job } from "./api";
+import {
+  ApiError,
+  cancelJob,
+  createImageJob,
+  listJobs,
+  retryJob,
+  setCsrfToken,
+  type Job,
+} from "./api";
 
 const job: Job = {
   id: 12,
@@ -44,6 +52,7 @@ const job: Job = {
 };
 
 afterEach(() => {
+  setCsrfToken(null);
   vi.unstubAllGlobals();
 });
 
@@ -58,7 +67,10 @@ describe("jobs API client", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(listJobs()).resolves.toEqual([job]);
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/jobs", { signal: undefined });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/jobs",
+      expect.objectContaining({ credentials: "same-origin", signal: undefined }),
+    );
   });
 
   it("keeps the backend validation message for the form", async () => {
@@ -111,7 +123,8 @@ describe("jobs API client", () => {
     ).resolves.toEqual(job);
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(init.headers).toBeUndefined();
+    expect(init.credentials).toBe("same-origin");
+    expect((init.headers as Headers).has("content-type")).toBe(false);
     expect(init.body).toBeInstanceOf(FormData);
     const form = init.body as FormData;
     expect(form.get("name")).toBe(job.name);
@@ -132,18 +145,23 @@ describe("jobs API client", () => {
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
+    setCsrfToken("test-csrf-token");
 
     await cancelJob(job.id);
     await retryJob(job.id);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, `/api/v1/jobs/${job.id}/cancel`, {
-      method: "POST",
-      signal: undefined,
-    });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, `/api/v1/jobs/${job.id}/retry`, {
-      method: "POST",
-      signal: undefined,
-    });
+    const first = fetchMock.mock.calls[0] as [string, RequestInit];
+    const second = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(first[0]).toBe(`/api/v1/jobs/${job.id}/cancel`);
+    expect(second[0]).toBe(`/api/v1/jobs/${job.id}/retry`);
+    for (const [, init] of [first, second]) {
+      expect(init).toMatchObject({
+        method: "POST",
+        signal: undefined,
+        credentials: "same-origin",
+      });
+      expect((init.headers as Headers).get("x-csrf-token")).toBe("test-csrf-token");
+    }
   });
 
   it("turns a network failure into a clear availability error", async () => {

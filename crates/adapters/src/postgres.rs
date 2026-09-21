@@ -9,6 +9,7 @@ use taskharbor_core::{Job, JobId, JobName, JobPriority, JobStatus, JobType, Sche
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::auth_repository::UserId;
 use crate::image_repository::{
     ArtifactKind, ArtifactRecord, JobSettings, load_artifacts, load_input_artifacts,
 };
@@ -90,6 +91,20 @@ impl PgJobRepository {
     }
 
     pub async fn list(&self) -> Result<Vec<JobRecord>, RepositoryError> {
+        self.list_with_owner(None).await
+    }
+
+    pub async fn list_for_owner(
+        &self,
+        owner_user_id: UserId,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
+        self.list_with_owner(Some(owner_user_id)).await
+    }
+
+    async fn list_with_owner(
+        &self,
+        owner_user_id: Option<UserId>,
+    ) -> Result<Vec<JobRecord>, RepositoryError> {
         let rows = sqlx::query_as::<_, JobRow>(
             r#"
             SELECT
@@ -116,9 +131,11 @@ impl PgJobRepository {
                 started_at,
                 finished_at
             FROM jobs
+            WHERE $1::BIGINT IS NULL OR owner_user_id = $1
             ORDER BY id
             "#,
         )
+        .bind(owner_user_id.map(UserId::get))
         .fetch_all(&self.pool)
         .await?;
 
@@ -132,6 +149,22 @@ impl PgJobRepository {
     }
 
     pub async fn get(&self, id: JobId) -> Result<Option<JobRecord>, RepositoryError> {
+        self.get_with_owner(id, None).await
+    }
+
+    pub async fn get_for_owner(
+        &self,
+        id: JobId,
+        owner_user_id: UserId,
+    ) -> Result<Option<JobRecord>, RepositoryError> {
+        self.get_with_owner(id, Some(owner_user_id)).await
+    }
+
+    async fn get_with_owner(
+        &self,
+        id: JobId,
+        owner_user_id: Option<UserId>,
+    ) -> Result<Option<JobRecord>, RepositoryError> {
         let row = sqlx::query_as::<_, JobRow>(
             r#"
             SELECT
@@ -159,9 +192,11 @@ impl PgJobRepository {
                 finished_at
             FROM jobs
             WHERE id = $1
+              AND ($2::BIGINT IS NULL OR owner_user_id = $2)
             "#,
         )
         .bind(encode_job_id(id)?)
+        .bind(owner_user_id.map(UserId::get))
         .fetch_optional(&self.pool)
         .await?;
 
@@ -208,7 +243,8 @@ impl PgJobRepository {
                 max_width,
                 jpeg_quality,
                 progress_total,
-                max_attempts
+                max_attempts,
+                available_at
             FROM jobs
             WHERE state IN ('queued', 'retry_waiting')
               AND available_at <= $1
@@ -355,6 +391,14 @@ impl PgJobRepository {
             worker_id,
             claim_token,
             lease_expires_at: attempt.1,
+            queue_wait: Duration::from_millis(
+                u64::try_from(
+                    (claim_time - candidate.available_at)
+                        .whole_milliseconds()
+                        .max(0),
+                )
+                .unwrap_or(u64::MAX),
+            ),
             work,
         }))
     }
@@ -543,6 +587,7 @@ pub struct ClaimedJob {
     worker_id: WorkerId,
     claim_token: Uuid,
     lease_expires_at: OffsetDateTime,
+    queue_wait: Duration,
     work: ClaimedWork,
 }
 
@@ -575,6 +620,10 @@ impl ClaimedJob {
         self.lease_expires_at
     }
 
+    pub const fn queue_wait(&self) -> Duration {
+        self.queue_wait
+    }
+
     pub const fn work(&self) -> &ClaimedWork {
         &self.work
     }
@@ -598,6 +647,7 @@ pub enum RepositoryError {
     Migration(MigrateError),
     InvalidData(String),
     StateConflict(&'static str),
+    IdempotencyConflict,
     ClaimLost,
 }
 
@@ -612,6 +662,10 @@ impl Display for RepositoryError {
             Self::StateConflict(operation) => {
                 write!(formatter, "job state changed while trying to {operation}")
             }
+            Self::IdempotencyConflict => write!(
+                formatter,
+                "idempotency key was already used for a different request"
+            ),
             Self::ClaimLost => write!(formatter, "worker no longer owns this job attempt"),
         }
     }
@@ -622,7 +676,10 @@ impl Error for RepositoryError {
         match self {
             Self::Database(error) => Some(error),
             Self::Migration(error) => Some(error),
-            Self::InvalidData(_) | Self::StateConflict(_) | Self::ClaimLost => None,
+            Self::InvalidData(_)
+            | Self::StateConflict(_)
+            | Self::IdempotencyConflict
+            | Self::ClaimLost => None,
         }
     }
 }
@@ -761,6 +818,7 @@ struct ClaimRow {
     jpeg_quality: Option<i16>,
     progress_total: i32,
     max_attempts: i32,
+    available_at: OffsetDateTime,
 }
 
 pub(crate) fn decode_job_id(value: i64) -> Result<JobId, RepositoryError> {

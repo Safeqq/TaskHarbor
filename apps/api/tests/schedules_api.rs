@@ -11,11 +11,13 @@ use sqlx::PgPool;
 use taskharbor_adapters::{
     ImageService, LocalStorage, PgJobRepository, WorkerId, WorkerRegistration,
 };
-use taskharbor_api::app;
 use taskharbor_worker::process_claimed;
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
 use tower::ServiceExt;
+
+mod common;
+use common::authenticated_app;
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
@@ -60,7 +62,7 @@ async fn serves_one_off_and_recurring_schedule_contracts() {
     let storage = LocalStorage::initialize(temporary.path())
         .await
         .expect("temporary storage should initialize");
-    let router = app(repository.clone(), storage.clone());
+    let router = authenticated_app(repository.clone(), storage.clone()).await;
     let source = test_png();
 
     let (content_type, one_off_body) = multipart_image(

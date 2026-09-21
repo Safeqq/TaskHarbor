@@ -5,6 +5,7 @@ use taskharbor_core::JobId;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::auth_repository::UserId;
 use crate::postgres::{
     ClaimedJob, JobRecord, PgJobRepository, RepositoryError, decode_job_id, decode_u32, decode_u64,
     encode_job_id, ensure_claim_row, ensure_one_row,
@@ -308,6 +309,23 @@ impl PgJobRepository {
     }
 
     pub async fn request_cancel(&self, id: JobId) -> Result<Option<JobRecord>, RepositoryError> {
+        self.request_cancel_with_owner(id, None).await
+    }
+
+    pub async fn request_cancel_for_owner(
+        &self,
+        id: JobId,
+        owner_user_id: UserId,
+    ) -> Result<Option<JobRecord>, RepositoryError> {
+        self.request_cancel_with_owner(id, Some(owner_user_id))
+            .await
+    }
+
+    async fn request_cancel_with_owner(
+        &self,
+        id: JobId,
+        owner_user_id: Option<UserId>,
+    ) -> Result<Option<JobRecord>, RepositoryError> {
         let job_id = encode_job_id(id)?;
         let updated = sqlx::query_scalar::<_, String>(
             r#"
@@ -327,6 +345,7 @@ impl PgJobRepository {
                     ELSE failure_message
                 END
             WHERE id = $1
+              AND ($2::BIGINT IS NULL OR owner_user_id = $2)
               AND state IN (
                   'queued',
                   'retry_waiting',
@@ -338,28 +357,60 @@ impl PgJobRepository {
             "#,
         )
         .bind(job_id)
+        .bind(owner_user_id.map(UserId::get))
         .fetch_optional(&self.pool)
         .await?;
 
         if updated.is_none() {
-            return if self.get(id).await?.is_some() {
+            let exists = match owner_user_id {
+                Some(owner_user_id) => self.get_for_owner(id, owner_user_id).await?.is_some(),
+                None => self.get(id).await?.is_some(),
+            };
+            return if exists {
                 Err(RepositoryError::StateConflict("cancel terminal job"))
             } else {
                 Ok(None)
             };
         }
 
-        self.get(id).await
+        match owner_user_id {
+            Some(owner_user_id) => self.get_for_owner(id, owner_user_id).await,
+            None => self.get(id).await,
+        }
     }
 
     pub async fn manual_retry(&self, id: JobId) -> Result<Option<JobRecord>, RepositoryError> {
+        self.manual_retry_with_owner(id, None).await
+    }
+
+    pub async fn manual_retry_for_owner(
+        &self,
+        id: JobId,
+        owner_user_id: UserId,
+    ) -> Result<Option<JobRecord>, RepositoryError> {
+        self.manual_retry_with_owner(id, Some(owner_user_id)).await
+    }
+
+    async fn manual_retry_with_owner(
+        &self,
+        id: JobId,
+        owner_user_id: Option<UserId>,
+    ) -> Result<Option<JobRecord>, RepositoryError> {
         let source_id = encode_job_id(id)?;
         let mut transaction = self.pool.begin().await?;
-        let source_state =
-            sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE id = $1 FOR UPDATE")
-                .bind(source_id)
-                .fetch_optional(&mut *transaction)
-                .await?;
+        let source_state = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT state
+            FROM jobs
+            WHERE id = $1
+              AND ($2::BIGINT IS NULL OR owner_user_id = $2)
+            FOR UPDATE
+            "#,
+        )
+        .bind(source_id)
+        .bind(owner_user_id.map(UserId::get))
+        .fetch_optional(&mut *transaction)
+        .await?;
 
         let Some(source_state) = source_state else {
             transaction.rollback().await?;
@@ -382,7 +433,8 @@ impl PgJobRepository {
                 jpeg_quality,
                 max_attempts,
                 priority,
-                retry_of_job_id
+                retry_of_job_id,
+                owner_user_id
             )
             SELECT
                 name,
@@ -395,7 +447,8 @@ impl PgJobRepository {
                 jpeg_quality,
                 max_attempts,
                 priority,
-                id
+                id,
+                owner_user_id
             FROM jobs
             WHERE id = $1
             RETURNING id
@@ -439,7 +492,11 @@ impl PgJobRepository {
         .await?;
 
         transaction.commit().await?;
-        self.get(decode_job_id(new_id)?).await
+        let new_id = decode_job_id(new_id)?;
+        match owner_user_id {
+            Some(owner_user_id) => self.get_for_owner(new_id, owner_user_id).await,
+            None => self.get(new_id).await,
+        }
     }
 }
 

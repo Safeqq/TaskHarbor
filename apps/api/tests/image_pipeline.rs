@@ -9,9 +9,11 @@ use image::{ColorType, GenericImageView, ImageEncoder, Rgba, RgbaImage};
 use serde_json::Value;
 use sqlx::PgPool;
 use taskharbor_adapters::{ImageService, LocalStorage, MAX_FILE_BYTES, PgJobRepository};
-use taskharbor_api::app;
 use taskharbor_worker::process_next;
 use tower::ServiceExt;
+
+mod common;
+use common::authenticated_app;
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
@@ -39,7 +41,7 @@ async fn uploads_processes_and_downloads_a_real_image() {
     let storage = LocalStorage::initialize(temporary.path())
         .await
         .expect("temporary storage should initialize");
-    let router = app(repository.clone(), storage.clone());
+    let router = authenticated_app(repository.clone(), storage.clone()).await;
     let source = transparent_png();
     let (content_type, body) = multipart_job(
         "transparent sample",

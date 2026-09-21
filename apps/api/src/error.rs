@@ -14,6 +14,63 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "authentication_required",
+            message: "sign in to access TaskHarbor".into(),
+            field: None,
+        }
+    }
+
+    pub fn invalid_credentials() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_credentials",
+            message: "username or password is incorrect".into(),
+            field: None,
+        }
+    }
+
+    pub fn invalid_csrf() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "invalid_csrf_token",
+            message: "the request is missing a valid CSRF token".into(),
+            field: None,
+        }
+    }
+
+    pub fn rate_limited(retry_after: std::time::Duration) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: format!(
+                "too many requests; try again in {} seconds",
+                retry_after.as_secs().max(1)
+            ),
+            field: None,
+        }
+    }
+
+    pub fn resource_limit(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INSUFFICIENT_STORAGE,
+            code,
+            message: message.into(),
+            field: None,
+        }
+    }
+
+    pub fn internal() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal_error",
+            message: "the request could not be completed".into(),
+            field: None,
+        }
+    }
+
     pub fn invalid_job_name(error: JobNameError) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -113,6 +170,19 @@ impl ApiError {
     }
 
     pub fn repository(error: RepositoryError) -> Self {
+        let category = match &error {
+            RepositoryError::Database(_) => "database",
+            RepositoryError::Migration(_) => "migration",
+            RepositoryError::InvalidData(_) => "invalid_data",
+            RepositoryError::StateConflict(_) => "state_conflict",
+            RepositoryError::IdempotencyConflict => "idempotency_conflict",
+            RepositoryError::ClaimLost => "claim_lost",
+        };
+        tracing::error!(
+            event = "repository_error",
+            category,
+            "repository operation failed"
+        );
         match error {
             RepositoryError::Database(_) | RepositoryError::Migration(_) => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
@@ -124,6 +194,12 @@ impl ApiError {
                 status: StatusCode::CONFLICT,
                 code: "job_state_conflict",
                 message: "the job is no longer in a state that allows this action".into(),
+                field: None,
+            },
+            RepositoryError::IdempotencyConflict => Self {
+                status: StatusCode::CONFLICT,
+                code: "idempotency_conflict",
+                message: "the idempotency key was already used for different job data".into(),
                 field: None,
             },
             RepositoryError::InvalidData(_) => Self {

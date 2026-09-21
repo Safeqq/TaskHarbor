@@ -6,9 +6,11 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use sqlx::PgPool;
 use taskharbor_adapters::{LocalStorage, PgJobRepository, WorkerId, WorkerRegistration};
-use taskharbor_api::app;
 use taskharbor_core::JobName;
 use tower::ServiceExt;
+
+mod common;
+use common::authenticated_app;
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
@@ -54,7 +56,7 @@ async fn exposes_worker_liveness_capacity_and_attempt_ownership() {
     let storage = LocalStorage::initialize(temporary.path())
         .await
         .expect("temporary storage should initialize");
-    let router = app(repository.clone(), storage);
+    let router = authenticated_app(repository.clone(), storage).await;
 
     let (status, workers) = send_json(
         router.clone(),

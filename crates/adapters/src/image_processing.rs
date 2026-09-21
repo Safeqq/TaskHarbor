@@ -290,6 +290,7 @@ impl ImageError {
             | Self::Storage(StorageError::InvalidKey) => FailureKind::Permanent,
             Self::Io(_)
             | Self::Storage(StorageError::Io(_))
+            | Self::Storage(StorageError::Join(_) | StorageError::UsageOverflow)
             | Self::Join(_)
             | Self::BlockingLimitClosed => FailureKind::Transient,
         }

@@ -6,7 +6,7 @@ use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sqlx::PgPool;
 use taskharbor_adapters::{
-    AttemptStatus, ImageService, LocalStorage, NewImageJob, NewInputArtifact,
+    AttemptStatus, ImageService, LocalStorage, NewImageJob, NewInputArtifact, OWNER_USER_ID,
     PendingOutputArtifact, PgJobRepository, RepositoryError, WorkerId, WorkerRegistration,
     WorkerStatus,
 };
@@ -334,6 +334,7 @@ async fn create_image_job(
     drop(file);
     let job = repository
         .create_image_job(NewImageJob {
+            owner_user_id: OWNER_USER_ID,
             name: JobName::new("recover image output").expect("test name should be valid"),
             max_width: 2,
             jpeg_quality: 85,
@@ -346,7 +347,9 @@ async fn create_image_job(
                 byte_size: u64::try_from(source.len()).expect("source size should fit u64"),
                 width: 4,
                 height: 2,
+                checksum_sha256: vec![0; 32],
             }],
+            idempotency: None,
         })
         .await
         .expect("image job should be created");

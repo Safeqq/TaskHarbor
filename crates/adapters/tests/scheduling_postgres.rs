@@ -2,7 +2,7 @@ use std::env;
 use std::time::Duration as StdDuration;
 
 use taskharbor_adapters::{
-    JobSettings, NewImageJob, NewInputArtifact, NewSchedule, PgJobRepository,
+    JobSettings, NewImageJob, NewInputArtifact, NewSchedule, OWNER_USER_ID, PgJobRepository,
     ScheduleOccurrenceOutcome, UpdateSchedule, WorkerId, WorkerRegistration,
 };
 use taskharbor_core::{JobName, JobPriority, JobStatus};
@@ -278,12 +278,14 @@ async fn create_job(
 ) -> taskharbor_adapters::JobRecord {
     repository
         .create_image_job(NewImageJob {
+            owner_user_id: OWNER_USER_ID,
             name: JobName::new(name).expect("test job name should be valid"),
             max_width: 2,
             jpeg_quality: 85,
             available_at: Some(available_at),
             priority,
             inputs: vec![test_input(&format!("inputs/jobs/{name}.png"))],
+            idempotency: None,
         })
         .await
         .expect("test image job should be created")
@@ -291,6 +293,7 @@ async fn create_job(
 
 fn new_schedule(name: &str, anchor_at: OffsetDateTime) -> NewSchedule {
     NewSchedule {
+        owner_user_id: OWNER_USER_ID,
         name: JobName::new(name).expect("test schedule name should be valid"),
         interval_seconds: 60,
         anchor_at,
@@ -309,6 +312,7 @@ fn test_input(storage_key: &str) -> NewInputArtifact {
         byte_size: 8,
         width: 4,
         height: 2,
+        checksum_sha256: vec![0; 32],
     }
 }
 

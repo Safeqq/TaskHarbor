@@ -5,17 +5,26 @@ use std::io;
 use taskharbor_adapters::{ImageService, LocalStorage, PgJobRepository};
 use taskharbor_worker::{
     DEFAULT_HEARTBEAT_INTERVAL, DEFAULT_HEARTBEAT_TTL, DEFAULT_LEASE_DURATION,
-    DEFAULT_LEASE_RENEWAL_INTERVAL, DEFAULT_SHUTDOWN_GRACE, DEFAULT_WORKER_CONCURRENCY,
-    WorkerConfig, run_with_config,
+    DEFAULT_LEASE_RENEWAL_INTERVAL, DEFAULT_MAINTENANCE_INTERVAL, DEFAULT_ORPHAN_GRACE,
+    DEFAULT_OUTPUT_RETENTION, DEFAULT_SHUTDOWN_GRACE, DEFAULT_STORAGE_BUDGET_BYTES,
+    DEFAULT_WORKER_CONCURRENCY, WorkerConfig, run_with_config,
 };
 use tokio::signal;
 use tokio::sync::watch;
+use tracing::warn;
+use tracing_subscriber::EnvFilter;
 
 const DEFAULT_STORAGE_DIR: &str = "var/storage";
 const DEFAULT_MAX_BLOCKING_TASKS: usize = 2;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .json()
+        .try_init()?;
     let database_url = env::var("DATABASE_URL").map_err(|_| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -57,12 +66,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "TASKHARBOR_SHUTDOWN_GRACE_SECONDS",
             DEFAULT_SHUTDOWN_GRACE,
         )?,
+        maintenance_interval: parse_duration(
+            "TASKHARBOR_MAINTENANCE_SECONDS",
+            DEFAULT_MAINTENANCE_INTERVAL,
+        )?,
+        output_retention: parse_duration(
+            "TASKHARBOR_OUTPUT_RETENTION_SECONDS",
+            DEFAULT_OUTPUT_RETENTION,
+        )?,
+        orphan_grace: parse_duration("TASKHARBOR_ORPHAN_GRACE_SECONDS", DEFAULT_ORPHAN_GRACE)?,
+        storage_budget_bytes: parse_positive_u64(
+            "TASKHARBOR_STORAGE_BUDGET_BYTES",
+            DEFAULT_STORAGE_BUDGET_BYTES,
+        )?,
     };
 
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let signal_task = tokio::spawn(async move {
         if let Err(error) = signal::ctrl_c().await {
-            eprintln!("Failed to listen for Ctrl+C: {error}");
+            warn!(%error, "failed to listen for Ctrl+C");
         }
         let _ = shutdown_sender.send(true);
     });
@@ -72,6 +94,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     result?;
 
     Ok(())
+}
+
+fn parse_positive_u64(name: &str, default: u64) -> Result<u64, io::Error> {
+    let value = env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse::<u64>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} must be a positive integer"),
+            )
+        })?;
+    if value == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must be greater than zero"),
+        ));
+    }
+    Ok(value)
 }
 
 fn parse_positive_usize(name: &str, default: usize) -> Result<usize, io::Error> {

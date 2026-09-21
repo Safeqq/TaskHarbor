@@ -1,9 +1,10 @@
 use axum::extract::Multipart;
 use axum::extract::multipart::{Field, MultipartRejection};
+use sha2::{Digest, Sha256};
 use taskharbor_adapters::{
-    DEFAULT_JPEG_QUALITY, DEFAULT_OUTPUT_WIDTH, ImageError, MAX_FILE_BYTES, MAX_FILES_PER_JOB,
-    MAX_OUTPUT_WIDTH, MAX_SCHEDULE_INTERVAL_SECONDS, MAX_TOTAL_FILE_BYTES,
-    MIN_SCHEDULE_INTERVAL_SECONDS, NewImageJob, NewInputArtifact, NewSchedule,
+    DEFAULT_JPEG_QUALITY, DEFAULT_OUTPUT_WIDTH, IdempotencyRequest, ImageError, MAX_FILE_BYTES,
+    MAX_FILES_PER_JOB, MAX_OUTPUT_WIDTH, MAX_SCHEDULE_INTERVAL_SECONDS, MAX_TOTAL_FILE_BYTES,
+    MIN_SCHEDULE_INTERVAL_SECONDS, NewImageJob, NewInputArtifact, NewSchedule, UserId,
 };
 use taskharbor_core::{JobName, JobPriority};
 use time::OffsetDateTime;
@@ -17,8 +18,12 @@ const MAX_TEXT_FIELD_BYTES: u64 = 512;
 
 pub async fn create_image_job(
     state: &AppState,
+    owner_user_id: UserId,
+    idempotency_key: Option<String>,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<taskharbor_adapters::JobRecord, ApiError> {
+    let _upload_guard = state.upload_guard.lock().await;
+    let storage_usage = storage_usage(state).await?;
     let multipart = multipart
         .map_err(|_| ApiError::invalid_multipart("request must be valid multipart form data"))?;
     let batch = state
@@ -27,7 +32,7 @@ pub async fn create_image_job(
         .await
         .map_err(ApiError::storage)?;
 
-    let staged = stage_fields(state, &batch, multipart, UploadTarget::Job).await;
+    let staged = stage_fields(state, &batch, multipart, UploadTarget::Job, storage_usage).await;
     let request = match staged {
         Ok(request) => request,
         Err(error) => {
@@ -38,15 +43,52 @@ pub async fn create_image_job(
 
     // A database commit can have an ambiguous outcome if the connection drops. Keep the staged
     // inputs so a job that did commit never points at files we deleted.
+    let idempotency = idempotency_key.map(|key| IdempotencyRequest {
+        key,
+        fingerprint: request_fingerprint(&request),
+    });
+    if let Some(idempotency) = &idempotency {
+        match state
+            .jobs
+            .find_idempotent_image_job(owner_user_id, idempotency)
+            .await
+        {
+            Ok(Some(job)) => {
+                let _ = batch.cleanup().await;
+                return Ok(job);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = batch.cleanup().await;
+                return Err(ApiError::repository(error));
+            }
+        }
+    }
+    let active_jobs = match state.jobs.active_job_count_for_owner(owner_user_id).await {
+        Ok(active_jobs) => active_jobs,
+        Err(error) => {
+            let _ = batch.cleanup().await;
+            return Err(ApiError::repository(error));
+        }
+    };
+    if active_jobs >= u64::from(state.config.max_active_jobs) {
+        let _ = batch.cleanup().await;
+        return Err(ApiError::resource_limit(
+            "active_job_limit",
+            "finish or cancel an active job before creating another",
+        ));
+    }
     state
         .jobs
         .create_image_job(NewImageJob {
+            owner_user_id,
             name: request.name,
             max_width: request.max_width,
             jpeg_quality: request.jpeg_quality,
             available_at: request.available_at,
             priority: request.priority,
             inputs: request.inputs,
+            idempotency,
         })
         .await
         .map_err(ApiError::repository)
@@ -54,8 +96,11 @@ pub async fn create_image_job(
 
 pub async fn create_schedule(
     state: &AppState,
+    owner_user_id: UserId,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<taskharbor_adapters::ScheduleRecord, ApiError> {
+    let _upload_guard = state.upload_guard.lock().await;
+    let storage_usage = storage_usage(state).await?;
     let multipart = multipart
         .map_err(|_| ApiError::invalid_multipart("request must be valid multipart form data"))?;
     let batch = state
@@ -64,7 +109,14 @@ pub async fn create_schedule(
         .await
         .map_err(ApiError::storage)?;
 
-    let staged = stage_fields(state, &batch, multipart, UploadTarget::Schedule).await;
+    let staged = stage_fields(
+        state,
+        &batch,
+        multipart,
+        UploadTarget::Schedule,
+        storage_usage,
+    )
+    .await;
     let request = match staged {
         Ok(request) => request,
         Err(error) => {
@@ -76,6 +128,7 @@ pub async fn create_schedule(
     state
         .jobs
         .create_schedule(NewSchedule {
+            owner_user_id,
             name: request.name,
             interval_seconds: request.interval_seconds.ok_or_else(|| {
                 ApiError::upload_validation(
@@ -122,6 +175,7 @@ async fn stage_fields(
     batch: &taskharbor_adapters::UploadBatch,
     mut multipart: Multipart,
     target: UploadTarget,
+    storage_usage: u64,
 ) -> Result<StagedImageFields, ApiError> {
     let mut name = None;
     let mut max_width = None;
@@ -227,7 +281,14 @@ async fn stage_fields(
                 let display_name = safe_display_name(raw_name, inputs.len());
                 let (storage_key, mut file) =
                     batch.create_file().await.map_err(ApiError::storage)?;
-                let byte_size = write_image_field(&mut field, &mut file, &mut total_bytes).await?;
+                let (byte_size, checksum_sha256) = write_image_field(
+                    &mut field,
+                    &mut file,
+                    &mut total_bytes,
+                    storage_usage,
+                    state.config.storage_budget_bytes,
+                )
+                .await?;
                 file.flush().await.map_err(|error| {
                     ApiError::storage(taskharbor_adapters::StorageError::from(error))
                 })?;
@@ -245,6 +306,7 @@ async fn stage_fields(
                     byte_size,
                     width: metadata.width,
                     height: metadata.height,
+                    checksum_sha256,
                 });
             }
             _ => {
@@ -305,8 +367,11 @@ async fn write_image_field(
     field: &mut Field<'_>,
     file: &mut tokio::fs::File,
     total_bytes: &mut u64,
-) -> Result<u64, ApiError> {
+    storage_usage: u64,
+    storage_budget: u64,
+) -> Result<(u64, Vec<u8>), ApiError> {
     let mut file_bytes = 0_u64;
+    let mut checksum = Sha256::new();
     while let Some(chunk) = field
         .chunk()
         .await
@@ -341,6 +406,15 @@ async fn write_image_field(
                 "images",
             )
         })?;
+        if storage_usage
+            .checked_add(*total_bytes)
+            .is_none_or(|projected| projected > storage_budget)
+        {
+            return Err(ApiError::resource_limit(
+                "storage_budget_exceeded",
+                "the storage budget does not have enough room for this upload",
+            ));
+        }
         if *total_bytes > MAX_TOTAL_FILE_BYTES {
             return Err(ApiError::upload_too_large(
                 "upload_too_large",
@@ -351,6 +425,7 @@ async fn write_image_field(
         file.write_all(&chunk)
             .await
             .map_err(|error| ApiError::storage(taskharbor_adapters::StorageError::from(error)))?;
+        checksum.update(&chunk);
     }
 
     if file_bytes == 0 {
@@ -360,7 +435,51 @@ async fn write_image_field(
             "images",
         ));
     }
-    Ok(file_bytes)
+    Ok((file_bytes, checksum.finalize().to_vec()))
+}
+
+async fn storage_usage(state: &AppState) -> Result<u64, ApiError> {
+    let usage = state
+        .storage
+        .usage_bytes()
+        .await
+        .map_err(ApiError::storage)?;
+    if usage >= state.config.storage_budget_bytes {
+        return Err(ApiError::resource_limit(
+            "storage_budget_exceeded",
+            "the storage budget is full; wait for retention cleanup before uploading",
+        ));
+    }
+    Ok(usage)
+}
+
+fn request_fingerprint(request: &StagedImageFields) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    fingerprint_part(&mut digest, request.name.as_str().as_bytes());
+    fingerprint_part(&mut digest, &request.max_width.to_be_bytes());
+    fingerprint_part(&mut digest, &[request.jpeg_quality]);
+    fingerprint_part(&mut digest, request.priority.as_str().as_bytes());
+    match request.available_at {
+        Some(available_at) => fingerprint_part(
+            &mut digest,
+            &available_at.unix_timestamp_nanos().to_be_bytes(),
+        ),
+        None => fingerprint_part(&mut digest, &[]),
+    }
+    for input in &request.inputs {
+        fingerprint_part(&mut digest, input.display_name.as_bytes());
+        fingerprint_part(&mut digest, input.media_type.as_bytes());
+        fingerprint_part(&mut digest, &input.byte_size.to_be_bytes());
+        fingerprint_part(&mut digest, &input.width.to_be_bytes());
+        fingerprint_part(&mut digest, &input.height.to_be_bytes());
+        fingerprint_part(&mut digest, &input.checksum_sha256);
+    }
+    digest.finalize().to_vec()
+}
+
+fn fingerprint_part(digest: &mut Sha256, value: &[u8]) {
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value);
 }
 
 async fn read_small_text(

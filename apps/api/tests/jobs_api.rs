@@ -9,8 +9,10 @@ use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use serde_json::{Value, json};
 use taskharbor_adapters::{LocalStorage, PgJobRepository};
-use taskharbor_api::app;
 use tower::ServiceExt;
+
+mod common;
+use common::authenticated_app;
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL pointing to PostgreSQL"]
@@ -28,7 +30,7 @@ async fn serves_persistent_jobs_and_consistent_errors() {
     let storage = LocalStorage::initialize(storage_root.path())
         .await
         .expect("temporary storage should initialize");
-    let router = app(repository, storage.clone());
+    let router = authenticated_app(repository, storage.clone()).await;
     let unique_suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should be after the Unix epoch")
@@ -160,7 +162,7 @@ async fn serves_persistent_jobs_and_consistent_errors() {
     let reconnected = PgJobRepository::connect(&database_url, 2)
         .await
         .expect("API should reconnect after a simulated restart");
-    let persisted_router = app(reconnected, storage);
+    let persisted_router = authenticated_app(reconnected, storage).await;
     let (persisted_status, persisted) = send(
         persisted_router,
         Request::get(format!("/api/v1/jobs/{job_id}"))

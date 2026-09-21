@@ -23,6 +23,12 @@ const workerMocks = vi.hoisted(() => ({
   listWorkers: vi.fn(),
 }));
 
+const sessionMocks = vi.hoisted(() => ({
+  getSession: vi.fn(),
+  login: vi.fn(),
+  logout: vi.fn(),
+}));
+
 vi.mock("./features/jobs/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./features/jobs/api")>();
   return {
@@ -48,6 +54,12 @@ vi.mock("./features/workers/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./features/workers/api")>();
   return { ...actual, listWorkers: workerMocks.listWorkers };
 });
+
+vi.mock("./features/session/api", () => ({
+  getSession: sessionMocks.getSession,
+  login: sessionMocks.login,
+  logout: sessionMocks.logout,
+}));
 
 const queuedJob: Job = {
   id: 41,
@@ -143,6 +155,15 @@ beforeEach(() => {
   scheduleMocks.createSchedule.mockReset();
   scheduleMocks.updateSchedule.mockReset();
   workerMocks.listWorkers.mockReset();
+  sessionMocks.getSession.mockReset();
+  sessionMocks.login.mockReset();
+  sessionMocks.logout.mockReset();
+  sessionMocks.getSession.mockResolvedValue({
+    user: { id: 1, username: "owner" },
+    expires_at: "2026-09-21T00:00:00Z",
+    csrf_token: "test-csrf",
+  });
+  sessionMocks.logout.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -150,13 +171,42 @@ afterEach(() => {
 });
 
 describe("Jobs dashboard", () => {
+  it("signs in before loading private data and signs out", async () => {
+    sessionMocks.getSession.mockRejectedValue(
+      new ApiError("sign in to access TaskHarbor", 401, "authentication_required"),
+    );
+    sessionMocks.login.mockResolvedValue({
+      user: { id: 1, username: "owner" },
+      expires_at: "2026-09-21T00:00:00Z",
+      csrf_token: "login-csrf",
+    });
+    apiMocks.listJobs.mockResolvedValue([]);
+
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", { name: "Sign in to TaskHarbor" }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "private-password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("No jobs in the harbor yet")).toBeInTheDocument();
+    expect(sessionMocks.login).toHaveBeenCalledWith("owner", "private-password");
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(
+      await screen.findByRole("heading", { name: "Sign in to TaskHarbor" }),
+    ).toBeInTheDocument();
+    expect(sessionMocks.logout).toHaveBeenCalledOnce();
+  });
+
   it("distinguishes the initial loading state from an empty queue", async () => {
     const firstRequest = deferred<Job[]>();
     apiMocks.listJobs.mockReturnValue(firstRequest.promise);
 
     render(<App />);
 
-    expect(screen.getByRole("status")).toHaveTextContent("Loading jobs");
+    expect(await screen.findByText("Loading jobs…")).toBeInTheDocument();
     expect(screen.queryByText("No jobs in the harbor yet")).not.toBeInTheDocument();
 
     await act(async () => {
@@ -244,7 +294,7 @@ describe("Jobs dashboard", () => {
     scheduleMocks.listSchedules.mockResolvedValue([recurringSchedule]);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Schedules" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Schedules" }));
 
     expect(await screen.findByRole("heading", { name: "Recurring work, anchored." })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: recurringSchedule.name })).toBeInTheDocument();
@@ -257,7 +307,7 @@ describe("Jobs dashboard", () => {
     workerMocks.listWorkers.mockResolvedValue([onlineWorker]);
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Workers" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Workers" }));
 
     expect(await screen.findByRole("heading", { name: "Workers, visible." })).toBeInTheDocument();
     expect(screen.getByText(onlineWorker.name)).toBeInTheDocument();
@@ -274,6 +324,10 @@ describe("Jobs dashboard", () => {
       .mockReturnValueOnce(secondRequest.promise);
 
     const { unmount } = render(<App pollIntervalMs={2_000} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(apiMocks.listJobs).toHaveBeenCalledTimes(1);
 
     await act(async () => {

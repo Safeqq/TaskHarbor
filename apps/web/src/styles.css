@@ -151,6 +151,70 @@ svg {
   gap: 1rem;
 }
 
+.topbar__logout {
+  padding: 0.42rem 0.7rem;
+  color: var(--navy);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.45rem;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.login-page {
+  display: grid;
+  min-height: 100vh;
+  padding: 1.5rem;
+  place-items: center;
+}
+
+.login-card {
+  width: min(100%, 28rem);
+  padding: clamp(1.5rem, 5vw, 2.5rem);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  box-shadow: var(--shadow);
+}
+
+.login-card h1 {
+  margin: 0.45rem 0 0.65rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(2rem, 8vw, 3rem);
+  letter-spacing: -0.04em;
+}
+
+.login-card > p {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+}
+
+.login-card form,
+.login-card label {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.login-card form {
+  gap: 1rem;
+}
+
+.login-card label {
+  color: var(--navy);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.login-card input {
+  width: 100%;
+  padding: 0.75rem 0.85rem;
+  color: var(--ink);
+  background: white;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.5rem;
+}
+
 .topbar__nav {
   display: flex;
   align-items: center;
