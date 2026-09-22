@@ -67,6 +67,8 @@ impl LocalStorage {
     pub fn resolve_key(&self, key: &str) -> Result<PathBuf, StorageError> {
         let relative = Path::new(key);
         if key.is_empty()
+            || key.contains('\\')
+            || key.contains(':')
             || relative.is_absolute()
             || relative
                 .components()
@@ -265,6 +267,8 @@ mod tests {
         assert!(storage.resolve_key("../outside").is_err());
         assert!(storage.resolve_key("inputs/../../outside").is_err());
         assert!(storage.resolve_key("C:\\outside").is_err());
+        assert!(storage.resolve_key("C:/outside").is_err());
+        assert!(storage.resolve_key("\\\\server\\share").is_err());
 
         for (key, contents) in [
             ("inputs/referenced/source.png", b"input".as_slice()),

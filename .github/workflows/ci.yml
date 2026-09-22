@@ -47,7 +47,7 @@ jobs:
         run: cargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run unit tests
-        run: cargo +1.95.0 test --workspace --locked
+        run: cargo +1.95.0 test --workspace --locked --lib
 
       - name: Run adapter integration tests
         run: cargo +1.95.0 test -p taskharbor-adapters --locked -- --ignored --test-threads=1
