@@ -295,6 +295,14 @@ function AttemptHistory({
                     <dd>{formatDuration(attempt.duration_ms)}</dd>
                   </div>
                   <div>
+                    <dt>Queue wait</dt>
+                    <dd>{formatDuration(attempt.queue_wait_ms)}</dd>
+                  </div>
+                  <div>
+                    <dt>Encoding</dt>
+                    <dd>{formatDuration(attempt.encoding_duration_ms)}</dd>
+                  </div>
+                  <div>
                     <dt>Finished</dt>
                     <dd>{formatDateTime(attempt.finished_at)}</dd>
                   </div>

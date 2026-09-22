@@ -289,6 +289,14 @@ impl PgJobRepository {
                 "job has no remaining attempts".into(),
             ));
         }
+        let queue_wait_ms = u64::try_from(
+            (claim_time - candidate.available_at)
+                .whole_milliseconds()
+                .max(0),
+        )
+        .map_err(|_| RepositoryError::InvalidData("queue wait exceeds u64".into()))?;
+        let queue_wait_database = i64::try_from(queue_wait_ms)
+            .map_err(|_| RepositoryError::InvalidData("queue wait exceeds BIGINT".into()))?;
 
         let updated = sqlx::query(
             r#"
@@ -321,7 +329,8 @@ impl PgJobRepository {
                 started_at,
                 worker_id,
                 claim_token,
-                lease_expires_at
+                lease_expires_at,
+                queue_wait_ms
             )
             SELECT
                 $1,
@@ -331,7 +340,8 @@ impl PgJobRepository {
                 $4,
                 worker.id,
                 $6,
-                $4 + (worker.lease_duration_seconds * INTERVAL '1 second')
+                $4 + (worker.lease_duration_seconds * INTERVAL '1 second'),
+                $7
             FROM workers AS worker
             WHERE worker.id = $5
               AND worker.stopped_at IS NULL
@@ -345,6 +355,7 @@ impl PgJobRepository {
         .bind(claim_time)
         .bind(worker_id.as_uuid())
         .bind(claim_token)
+        .bind(queue_wait_database)
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(RepositoryError::StateConflict(
@@ -391,14 +402,7 @@ impl PgJobRepository {
             worker_id,
             claim_token,
             lease_expires_at: attempt.1,
-            queue_wait: Duration::from_millis(
-                u64::try_from(
-                    (claim_time - candidate.available_at)
-                        .whole_milliseconds()
-                        .max(0),
-                )
-                .unwrap_or(u64::MAX),
-            ),
+            queue_wait: Duration::from_millis(queue_wait_ms),
             work,
         }))
     }

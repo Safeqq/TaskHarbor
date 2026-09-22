@@ -633,10 +633,24 @@ async fn process_images(
 
         let output_key =
             storage.output_key(claimed.job_id().get(), claimed.attempt_id(), input.id());
-        let processed = match images
+        let encoding_started_at = Instant::now();
+        let processing_result = images
             .resize_to_jpeg(input.storage_key(), output_key, max_width, jpeg_quality)
-            .await
-        {
+            .await;
+        let encoding_duration = encoding_started_at.elapsed();
+        repository
+            .record_encoding_duration(claimed, encoding_duration)
+            .await?;
+        debug!(
+            event = "image_encoding_finished",
+            job_id = %claimed.job_id(),
+            attempt_id = claimed.attempt_id(),
+            item_index = input.item_index(),
+            encoding_duration_ms = encoding_duration.as_millis(),
+            succeeded = processing_result.is_ok(),
+            "image encoding finished"
+        );
+        let processed = match processing_result {
             Ok(processed) => processed,
             Err(image_error) => {
                 warn!(

@@ -4,9 +4,9 @@ services:
     environment:
       POSTGRES_DB: taskharbor
       POSTGRES_USER: taskharbor
-      POSTGRES_PASSWORD: taskharbor_dev
+      POSTGRES_PASSWORD: ${TASKHARBOR_DB_PASSWORD:-taskharbor_dev}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${TASKHARBOR_POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
@@ -16,5 +16,78 @@ services:
       timeout: 3s
       retries: 15
 
+  api:
+    image: taskharbor-api:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rust
+    command: ["taskharbor-api"]
+    init: true
+    environment:
+      DATABASE_URL: postgres://taskharbor:${TASKHARBOR_DB_PASSWORD:-taskharbor_dev}@postgres:5432/taskharbor
+      TASKHARBOR_BIND_ADDR: 0.0.0.0:3000
+      TASKHARBOR_ALLOW_REMOTE: "true"
+      TASKHARBOR_SECURE_COOKIES: "true"
+      TASKHARBOR_OWNER_USERNAME: ${TASKHARBOR_OWNER_USERNAME:-owner}
+      TASKHARBOR_OWNER_PASSWORD: ${TASKHARBOR_OWNER_PASSWORD:?set TASKHARBOR_OWNER_PASSWORD before starting Compose}
+      TASKHARBOR_STORAGE_DIR: /var/lib/taskharbor/storage
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - storage_data:/var/lib/taskharbor/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/health/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    image: taskharbor-worker:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rust
+    command: ["taskharbor-worker"]
+    init: true
+    environment:
+      DATABASE_URL: postgres://taskharbor:${TASKHARBOR_DB_PASSWORD:-taskharbor_dev}@postgres:5432/taskharbor
+      TASKHARBOR_STORAGE_DIR: /var/lib/taskharbor/storage
+      TASKHARBOR_WORKER_NAME: ${TASKHARBOR_WORKER_NAME:-worker-compose}
+      TASKHARBOR_WORKER_CONCURRENCY: ${TASKHARBOR_WORKER_CONCURRENCY:-2}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - storage_data:/var/lib/taskharbor/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - tls_data:/etc/nginx/tls
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "--quiet", "--spider", "https://127.0.0.1:8443/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   postgres_data:
+  storage_data:
+  tls_data:

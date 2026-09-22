@@ -688,6 +688,8 @@ struct AttemptResponse {
     #[serde(with = "time::serde::rfc3339::option")]
     finished_at: Option<OffsetDateTime>,
     duration_ms: Option<u64>,
+    queue_wait_ms: u64,
+    encoding_duration_ms: u64,
     error_kind: Option<String>,
     error_message: Option<String>,
     worker: Option<AttemptWorkerResponse>,
@@ -714,6 +716,8 @@ impl From<&AttemptRecord> for AttemptResponse {
             started_at: attempt.started_at(),
             finished_at: attempt.finished_at(),
             duration_ms: attempt.duration_ms(),
+            queue_wait_ms: attempt.queue_wait_ms(),
+            encoding_duration_ms: attempt.encoding_duration_ms(),
             error_kind: attempt.error_kind().map(str::to_owned),
             error_message: attempt.error_message().map(str::to_owned),
             worker: attempt.worker_id().map(|worker_id| AttemptWorkerResponse {

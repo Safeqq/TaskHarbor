@@ -4,7 +4,7 @@ TaskHarbor is a learning-focused portfolio project for creating, running, and mo
 
 ## Current milestone
 
-Phase 8 makes the single-owner dashboard suitable for a limited demo. The API now requires an Argon2id-backed owner login, expiring server-side sessions, strict cookies, CSRF tokens, ownership checks, rate limits, and resource budgets. The worker emits structured JSON logs, reports queue measurements, expires old output, removes safe orphans, and supports a tested database-plus-files backup workflow.
+Phase 9 completes the portfolio release. CI checks Rust formatting, Clippy, unit tests, PostgreSQL integration tests, frontend tests, type checking, production builds, and a clean Compose smoke test. The Compose stack runs PostgreSQL, the API, a worker, and the web dashboard behind local HTTPS. A reproducible benchmark records API throughput, queue wait, image encoding, end-to-end latency, memory, and failure rate as separate measurements.
 
 The current request flow is:
 
@@ -18,6 +18,16 @@ The current request flow is:
 8. Active workers renew leases while processing. If a lease expires, any worker can transactionally close that attempt and schedule a retry, finish a pending cancellation, or fail the job when its attempt limit is exhausted.
 9. Every progress, failure, cancellation, and completion write checks the attempt owner and token. A stale worker can finish physical computation, but PostgreSQL rejects its write and its per-attempt output directory is discarded.
 10. PostgreSQL publishes the complete output manifest only after every item succeeds. Maintenance preserves referenced input and active attempt paths while applying output retention and orphan grace periods.
+
+```mermaid
+flowchart LR
+    Browser[React dashboard] -->|HTTPS + session + CSRF| Gateway[Nginx]
+    Gateway --> API[Axum API]
+    API --> DB[(PostgreSQL queue)]
+    API --> Storage[(Shared image storage)]
+    Worker[Rust worker] -->|claim, lease, fenced writes| DB
+    Worker -->|read inputs, publish outputs| Storage
+```
 
 The default `max_attempts` is three, including the first attempt. Manual retry leaves a terminal job and its history unchanged, creates a linked job through `retry_of_job_id`, and reuses the same source files.
 
@@ -34,35 +44,57 @@ apps/web/          React dashboard, API client, polling, and UI tests
 crates/adapters/   PostgreSQL, local storage, and image processing adapters
 crates/core/       Domain types and validation rules
 migrations/        Append-only PostgreSQL schema changes
-deploy/            Local PostgreSQL Compose configuration
-docs/              Learning checkpoint and project glossary
+deploy/            Container images, HTTPS gateway, and complete Compose stack
+docs/adr/          Architecture decision records
+docs/openapi.yaml  OpenAPI 3.0 contract
+scripts/           Backup, restore, benchmark, and Compose smoke workflows
+docs/              Benchmark, demo, learning progress, and glossary
 ```
-
-The remaining target structure will be added only when its roadmap phase needs it.
 
 ## Requirements
 
 - Rust 1.95.0 with Cargo, rustfmt, and Clippy
 - Node.js 24.11.1 with npm 11.6.2
 - Git
-- PostgreSQL 18, either through Docker Compose or a local installation
+- Docker with Compose for the complete stack, or PostgreSQL 18 for manual development
 
-Docker is optional when PostgreSQL is installed directly.
+Rust and Node.js are only needed when developing outside the containers.
 
 ## Run locally
 
-The repository pins its Rust version in `rust-toolchain.toml`. Start the development and test databases with Docker:
+### Complete stack with Docker
 
-```bash
-docker compose -f deploy/compose.yaml up -d
+Set a local owner password and start every service from a clean checkout:
+
+```powershell
+$env:TASKHARBOR_OWNER_PASSWORD = "choose-a-local-password-with-12-or-more-bytes"
+docker compose -f deploy/compose.yaml up --build --wait
 ```
 
-The Compose service binds PostgreSQL to `127.0.0.1:5432` and creates both `taskharbor` and `taskharbor_test`. Set the environment variable from `.env.example`; the application does not load `.env` automatically.
+Open `https://localhost:8443`. The web container creates a 30-day self-signed localhost certificate on first startup, so the browser will require a one-time local certificate exception. `http://localhost:8080` redirects to HTTPS. PostgreSQL is also available to the host at `127.0.0.1:55432` by default.
+
+The API and worker run as an unprivileged user and share only the named image-storage volume. Stop the stack and remove its local data with:
+
+```bash
+docker compose -f deploy/compose.yaml down --volumes
+```
+
+### Manual development
+
+The repository pins its Rust version in `rust-toolchain.toml`. To use only the Compose PostgreSQL service, start it and connect through port 55432:
+
+```powershell
+$env:TASKHARBOR_OWNER_PASSWORD = "choose-a-local-password-with-12-or-more-bytes"
+docker compose -f deploy/compose.yaml up -d postgres
+$env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:55432/taskharbor"
+```
+
+Compose validates the complete service model even when only PostgreSQL is selected, so the owner password variable is still required; the API is not started by this command. A native PostgreSQL installation may use another port, such as 5432. The initialization script creates both `taskharbor` and `taskharbor_test`. Environment examples live in `.env.example`; the executables intentionally do not load that file automatically.
 
 Start the API:
 
 ```powershell
-$env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:5432/taskharbor"
+$env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:55432/taskharbor"
 $env:TASKHARBOR_OWNER_PASSWORD = "choose-a-local-password-with-12-or-more-bytes"
 cargo run -p taskharbor-api --locked
 ```
@@ -70,14 +102,14 @@ cargo run -p taskharbor-api --locked
 Start the worker in a second terminal with the same `DATABASE_URL`:
 
 ```powershell
-$env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:5432/taskharbor"
+$env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:55432/taskharbor"
 cargo run -p taskharbor-worker --locked
 ```
 
 To run two named workers against the same database and storage, start this command in two terminals and use a different name in each:
 
 ```powershell
-$env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:5432/taskharbor"
+$env:DATABASE_URL = "postgres://taskharbor:taskharbor_dev@127.0.0.1:55432/taskharbor"
 $env:TASKHARBOR_WORKER_NAME = "worker-a"
 $env:TASKHARBOR_WORKER_CONCURRENCY = "2"
 cargo run -p taskharbor-worker --locked
@@ -103,6 +135,8 @@ The API refuses to start without `TASKHARBOR_OWNER_PASSWORD` and accepts passwor
 ```
 
 ## API
+
+The complete request, response, authentication, and error schemas are in [`docs/openapi.yaml`](docs/openapi.yaml).
 
 | Method | Path | Result |
 |---|---|---|
@@ -195,7 +229,7 @@ Validation and parsing errors use a consistent envelope:
 
 The worker runs maintenance at startup and then hourly by default. It expires published output after seven days, removes unreferenced files only after a one-hour grace period, preserves every database-referenced input, and protects output prefixes belonging to running attempts. Configure these periods with `TASKHARBOR_MAINTENANCE_SECONDS`, `TASKHARBOR_OUTPUT_RETENTION_SECONDS`, and `TASKHARBOR_ORPHAN_GRACE_SECONDS`.
 
-API and worker logs are JSON. Worker events include `job_id`, `attempt_id`, `worker_id`, queue depth, oldest eligible wait, attempt duration, and failure kind. Set `RUST_LOG` to change the filter. Request logs include method, path, status, and duration; credentials, cookies, CSRF tokens, filenames, and file contents are not logged.
+API and worker logs are JSON. Worker events include `job_id`, `attempt_id`, `worker_id`, queue depth, oldest eligible wait, encoding duration, attempt duration, and failure kind. Job attempt responses expose database-recorded queue wait and worker-recorded encoding duration. Set `RUST_LOG` to change the filter. Request logs include method, path, status, and duration; credentials, cookies, CSRF tokens, filenames, and file contents are not logged.
 
 A consistent backup needs PostgreSQL and the shared storage tree from the same quiet point. Stop the API and every worker before backup or restore; the scripts require the explicit `-ConfirmQuiesced` switch. Restore into an empty storage directory and a disposable or otherwise prepared database:
 
@@ -217,6 +251,14 @@ A consistent backup needs PostgreSQL and the shared storage tree from the same q
 
 The backup manifest contains SHA-256 checksums for the custom-format database dump and storage ZIP. It contains no database URL or password. `restore.ps1` verifies both checksums and rejects unsafe ZIP paths before running `pg_restore`.
 
+## Design records and evidence
+
+- [`docs/adr/0001-postgresql-job-queue.md`](docs/adr/0001-postgresql-job-queue.md) explains the database-backed queue and short claim transaction.
+- [`docs/adr/0002-leases-and-fencing.md`](docs/adr/0002-leases-and-fencing.md) explains crash recovery and stale-worker rejection.
+- [`docs/adr/0003-anchored-interval-scheduling.md`](docs/adr/0003-anchored-interval-scheduling.md) explains recurring slots, coalescing, and overlap handling.
+- [`docs/benchmark.md`](docs/benchmark.md) records the exact synthetic dataset, machine, settings, concurrency, separated results, and limitations of one local measurement.
+- [`docs/demo.md`](docs/demo.md) provides the verified recording, real screenshots, capture conditions, and limitations.
+
 ## Verify
 
 ```bash
@@ -236,5 +278,9 @@ cargo test -p taskharbor-adapters --locked -- --ignored --test-threads=1
 cargo test -p taskharbor-api --tests --locked -- --ignored --test-threads=1
 cargo test -p taskharbor-worker --tests --locked -- --ignored --test-threads=1
 ```
+
+GitHub Actions runs these gates with PostgreSQL 18.6, then builds the images from a clean checkout and executes `scripts/compose-smoke.sh`. That smoke test signs in through the HTTPS gateway, uploads a generated PNG, waits for the worker, and verifies the downloaded JPEG.
+
+To repeat the measured release workload, build and start release API and worker processes, then run `scripts/benchmark.ps1` with their process IDs. See [`docs/benchmark.md`](docs/benchmark.md) for the exact command and the scope of the result.
 
 Project progress and verified commands are recorded in `docs/progress.md`.

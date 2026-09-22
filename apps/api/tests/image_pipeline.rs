@@ -93,6 +93,8 @@ async fn uploads_processes_and_downloads_a_real_image() {
     assert_eq!(completed.1["outputs"][0]["width"], 4);
     assert_eq!(completed.1["outputs"][0]["height"], 2);
     assert_eq!(completed.1["outputs"][0]["media_type"], "image/jpeg");
+    assert!(completed.1["attempts"][0]["queue_wait_ms"].is_u64());
+    assert!(completed.1["attempts"][0]["encoding_duration_ms"].is_u64());
     let download_url = completed.1["outputs"][0]["download_url"]
         .as_str()
         .expect("completed output should have a download URL");

@@ -409,6 +409,35 @@ impl PgJobRepository {
         Ok(())
     }
 
+    pub async fn record_encoding_duration(
+        &self,
+        claimed: &ClaimedJob,
+        duration: Duration,
+    ) -> Result<(), RepositoryError> {
+        let duration_ms = i64::try_from(duration.as_millis())
+            .map_err(|_| RepositoryError::InvalidData("encoding duration exceeds BIGINT".into()))?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE job_attempts
+            SET encoding_duration_ms = encoding_duration_ms + $3
+            WHERE id = $1
+              AND job_id = $2
+              AND state = 'running'
+              AND worker_id = $4
+              AND claim_token = $5
+              AND lease_expires_at > CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(claimed.attempt_id())
+        .bind(encode_job_id(claimed.job_id())?)
+        .bind(duration_ms)
+        .bind(claimed.worker_id().as_uuid())
+        .bind(claimed.claim_token())
+        .execute(&self.pool)
+        .await?;
+        ensure_claim_row(updated.rows_affected())
+    }
+
     pub async fn complete_image_job(
         &self,
         claimed: &ClaimedJob,

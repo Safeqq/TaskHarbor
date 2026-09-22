@@ -1,0 +1,31 @@
+FROM rust:1.95.0-bookworm AS builder
+
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY apps/api apps/api
+COPY apps/worker apps/worker
+COPY crates/adapters crates/adapters
+COPY crates/core crates/core
+COPY migrations migrations
+
+RUN cargo build --workspace --release --locked
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 taskharbor \
+    && useradd --uid 10001 --gid taskharbor --home-dir /nonexistent --shell /usr/sbin/nologin taskharbor \
+    && mkdir -p /var/lib/taskharbor/storage \
+    && chown -R taskharbor:taskharbor /var/lib/taskharbor
+
+COPY --from=builder /workspace/target/release/taskharbor-api /usr/local/bin/taskharbor-api
+COPY --from=builder /workspace/target/release/taskharbor-worker /usr/local/bin/taskharbor-worker
+
+USER taskharbor
+WORKDIR /var/lib/taskharbor
+ENV TASKHARBOR_STORAGE_DIR=/var/lib/taskharbor/storage
+
+CMD ["taskharbor-api"]
+

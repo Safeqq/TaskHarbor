@@ -61,6 +61,8 @@ pub struct AttemptRecord {
     started_at: OffsetDateTime,
     finished_at: Option<OffsetDateTime>,
     duration_ms: Option<u64>,
+    queue_wait_ms: u64,
+    encoding_duration_ms: u64,
     error_kind: Option<String>,
     error_message: Option<String>,
     worker_id: Option<WorkerId>,
@@ -99,6 +101,14 @@ impl AttemptRecord {
 
     pub const fn duration_ms(&self) -> Option<u64> {
         self.duration_ms
+    }
+
+    pub const fn queue_wait_ms(&self) -> u64 {
+        self.queue_wait_ms
+    }
+
+    pub const fn encoding_duration_ms(&self) -> u64 {
+        self.encoding_duration_ms
     }
 
     pub fn error_kind(&self) -> Option<&str> {
@@ -515,6 +525,8 @@ pub(crate) async fn load_attempts(
             attempt.started_at,
             attempt.finished_at,
             attempt.duration_ms,
+            attempt.queue_wait_ms,
+            attempt.encoding_duration_ms,
             attempt.error_kind,
             attempt.error_message,
             attempt.worker_id,
@@ -557,6 +569,8 @@ struct AttemptRow {
     started_at: OffsetDateTime,
     finished_at: Option<OffsetDateTime>,
     duration_ms: Option<i64>,
+    queue_wait_ms: i64,
+    encoding_duration_ms: i64,
     error_kind: Option<String>,
     error_message: Option<String>,
     worker_id: Option<Uuid>,
@@ -599,6 +613,11 @@ impl TryFrom<AttemptRow> for AttemptRecord {
                 .duration_ms
                 .map(|value| decode_u64(value, "attempt duration"))
                 .transpose()?,
+            queue_wait_ms: decode_u64(row.queue_wait_ms, "attempt queue wait")?,
+            encoding_duration_ms: decode_u64(
+                row.encoding_duration_ms,
+                "attempt encoding duration",
+            )?,
             error_kind: row.error_kind,
             error_message: row.error_message,
             worker_id: row.worker_id.map(WorkerId::from_uuid),

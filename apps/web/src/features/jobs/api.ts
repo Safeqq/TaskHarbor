@@ -47,6 +47,8 @@ export interface JobAttempt {
   started_at: string;
   finished_at: string | null;
   duration_ms: number | null;
+  queue_wait_ms: number;
+  encoding_duration_ms: number;
   error_kind: "transient" | "permanent" | "cancelled" | null;
   error_message: string | null;
   worker: { id: string; name: string } | null;
