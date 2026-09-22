@@ -25,11 +25,43 @@ base_url="https://127.0.0.1:8443"
 cookie_jar="$temporary_directory/cookies.txt"
 source_image="$temporary_directory/source.png"
 downloaded_image="$temporary_directory/output.jpg"
+health_response="$temporary_directory/health.json"
+index_response="$temporary_directory/index.html"
+login_response="$temporary_directory/login.json"
+job_response="$temporary_directory/job.json"
+job_detail="$temporary_directory/job-detail.json"
 
-curl --fail --insecure --silent --show-error "$base_url/health/live" >/dev/null
-curl --fail --insecure --silent --show-error "$base_url/health/ready" >/dev/null
-index_html="$(curl --fail --insecure --silent --show-error "$base_url/")"
-grep --quiet "TaskHarbor" <<<"$index_html"
+request() {
+  local label="$1"
+  local failure_code="$2"
+  local output_path="$3"
+  shift 3
+
+  local http_status
+  if ! http_status="$(curl --insecure --silent --show-error \
+    --output "$output_path" \
+    --write-out "%{http_code}" \
+    "$@")"; then
+    printf '%s request could not be completed\n' "$label" >&2
+    exit "$failure_code"
+  fi
+  if [[ ! "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+    printf '%s request returned HTTP %s\n' "$label" "$http_status" >&2
+    if [[ -s "$output_path" ]]; then
+      head --bytes 4096 "$output_path" >&2
+      printf '\n' >&2
+    fi
+    exit "$failure_code"
+  fi
+}
+
+request "liveness" 31 "$health_response" "$base_url/health/live"
+request "readiness" 32 "$health_response" "$base_url/health/ready"
+request "web index" 33 "$index_response" "$base_url/"
+if ! grep --quiet "TaskHarbor" "$index_response"; then
+  printf 'web index did not contain the TaskHarbor marker\n' >&2
+  exit 34
+fi
 
 python3 - "$source_image" <<'PY'
 import binascii
@@ -64,14 +96,17 @@ import os
 print(json.dumps({"username": "owner", "password": os.environ["TASKHARBOR_OWNER_PASSWORD"]}))
 PY
 )"
-login_response="$(curl --fail --insecure --silent --show-error \
+request "login" 41 "$login_response" \
   --cookie-jar "$cookie_jar" \
   --header "Content-Type: application/json" \
   --data "$login_body" \
-  "$base_url/api/v1/session/login")"
-csrf_token="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["csrf_token"])' <<<"$login_response")"
+  "$base_url/api/v1/session/login"
+if ! csrf_token="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["csrf_token"])' "$login_response")"; then
+  printf 'login response did not contain a CSRF token\n' >&2
+  exit 42
+fi
 
-job_response="$(curl --fail --insecure --silent --show-error \
+request "job creation" 51 "$job_response" \
   --cookie "$cookie_jar" \
   --header "X-CSRF-Token: $csrf_token" \
   --header "Idempotency-Key: compose-smoke-job" \
@@ -79,21 +114,26 @@ job_response="$(curl --fail --insecure --silent --show-error \
   --form "max_width=2" \
   --form "jpeg_quality=85" \
   --form "images=@$source_image;type=image/png" \
-  "$base_url/api/v1/jobs")"
-job_id="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])' <<<"$job_response")"
+  "$base_url/api/v1/jobs"
+if ! job_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "$job_response")"; then
+  printf 'job creation response did not contain an ID\n' >&2
+  exit 52
+fi
 
 job_status=""
-job_detail=""
 for _ in {1..60}; do
-  job_detail="$(curl --fail --insecure --silent --show-error \
+  request "job detail" 53 "$job_detail" \
     --cookie "$cookie_jar" \
-    "$base_url/api/v1/jobs/$job_id")"
-  job_status="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])' <<<"$job_detail")"
+    "$base_url/api/v1/jobs/$job_id"
+  if ! job_status="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["status"])' "$job_detail")"; then
+    printf 'job detail response did not contain a status\n' >&2
+    exit 54
+  fi
   case "$job_status" in
     succeeded) break ;;
     failed|cancelled)
       printf 'job %s reached unexpected status %s\n' "$job_id" "$job_status" >&2
-      exit 1
+      exit 55
       ;;
   esac
   sleep 1
@@ -101,20 +141,25 @@ done
 
 if [[ "$job_status" != "succeeded" ]]; then
   printf 'job %s did not complete within 60 seconds; last status: %s\n' "$job_id" "$job_status" >&2
-  exit 1
+  exit 56
 fi
 
-download_path="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["outputs"][0]["download_url"])' <<<"$job_detail")"
-curl --fail --insecure --silent --show-error \
+if ! download_path="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["outputs"][0]["download_url"])' "$job_detail")"; then
+  printf 'succeeded job response did not contain an output download URL\n' >&2
+  exit 57
+fi
+request "output download" 61 "$downloaded_image" \
   --cookie "$cookie_jar" \
-  --output "$downloaded_image" \
   "$base_url$download_path"
-python3 - "$downloaded_image" <<'PY'
+if ! python3 - "$downloaded_image" <<'PY'
 import sys
 
 with open(sys.argv[1], "rb") as image:
     if image.read(2) != b"\xff\xd8":
         raise SystemExit("downloaded output is not a JPEG")
 PY
+then
+  exit 62
+fi
 
 printf 'Compose smoke test completed job %s through the HTTPS web gateway.\n' "$job_id"
