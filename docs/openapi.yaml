@@ -1,0 +1,947 @@
+openapi: 3.0.3
+info:
+  title: TaskHarbor API
+  version: 0.1.0
+  description: |
+    HTTP contract for the TaskHarbor single-owner job dashboard. Protected routes use
+    a server-side session cookie. Mutating protected routes also require the CSRF token
+    returned by the login or current-session response.
+servers:
+  - url: https://localhost:8443
+    description: Docker Compose HTTPS gateway with a local self-signed certificate
+  - url: http://127.0.0.1:3000
+    description: Direct localhost development API
+tags:
+  - name: Health
+  - name: Session
+  - name: Jobs
+  - name: Schedules
+  - name: Workers
+  - name: Artifacts
+
+paths:
+  /health:
+    get:
+      deprecated: true
+      tags: [Health]
+      summary: Compatibility alias for readiness
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+        "503":
+          $ref: "#/components/responses/Error"
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Check whether the API process is alive
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Check database and storage readiness
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Healthy"
+        "503":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/session/login:
+    post:
+      tags: [Session]
+      summary: Create an owner session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "201":
+          description: Session created; session and CSRF cookies are set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+  /api/v1/session:
+    get:
+      tags: [Session]
+      summary: Read the current session and current CSRF token
+      responses:
+        "200":
+          description: Active session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Session]
+      summary: Revoke the current session
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "204":
+          description: Session revoked and cookies expired.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/jobs:
+    get:
+      tags: [Jobs]
+      summary: List jobs owned by the current user
+      responses:
+        "200":
+          description: Jobs in ascending ID order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs]
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Jobs]
+      summary: Queue an image resize job
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/CreateJobForm"
+      responses:
+        "201":
+          description: Job queued, or the matching idempotent job returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "507":
+          $ref: "#/components/responses/Error"
+  /api/v1/jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      summary: Read one owned job and its attempt history
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Job detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/jobs/{jobId}/cancel:
+    post:
+      tags: [Jobs]
+      summary: Cancel a pending job or request cooperative cancellation
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "200":
+          description: Updated job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/v1/jobs/{jobId}/retry:
+    post:
+      tags: [Jobs]
+      summary: Create a linked retry for a failed or cancelled job
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "201":
+          description: Linked retry job created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/workers:
+    get:
+      tags: [Workers]
+      summary: List registered workers and inferred liveness
+      responses:
+        "200":
+          description: Worker registrations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workers]
+                properties:
+                  workers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Worker"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/schedules:
+    get:
+      tags: [Schedules]
+      summary: List recurring schedules
+      responses:
+        "200":
+          description: Owned schedules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schedules]
+                properties:
+                  schedules:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Schedules]
+      summary: Create an anchored recurring image schedule
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/CreateScheduleForm"
+      responses:
+        "201":
+          description: Schedule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "507":
+          $ref: "#/components/responses/Error"
+  /api/v1/schedules/{scheduleId}:
+    get:
+      tags: [Schedules]
+      summary: Read a recurring schedule and occurrence history
+      parameters:
+        - $ref: "#/components/parameters/ScheduleId"
+      responses:
+        "200":
+          description: Schedule detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Schedules]
+      summary: Update settings used by future occurrences
+      parameters:
+        - $ref: "#/components/parameters/ScheduleId"
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateScheduleRequest"
+      responses:
+        "200":
+          description: Updated schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/artifacts/{artifactId}/download:
+    get:
+      tags: [Artifacts]
+      summary: Download an owned published JPEG artifact
+      parameters:
+        - $ref: "#/components/parameters/ArtifactId"
+      responses:
+        "200":
+          description: JPEG output
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+
+security:
+  - cookieAuth: []
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: taskharbor_session
+      description: HttpOnly server-side session token set by the login response.
+  parameters:
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Token from the login or current-session JSON response.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: A 1-128 character key scoped to the owner.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    ScheduleId:
+      name: scheduleId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+  responses:
+    Healthy:
+      description: Process or dependency check succeeded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Health"
+    Error:
+      description: Request failed. The HTTP status and error code identify the category.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 32
+          example: owner
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 128
+    Session:
+      type: object
+      required: [user, expires_at, csrf_token]
+      properties:
+        user:
+          $ref: "#/components/schemas/SessionUser"
+        expires_at:
+          type: string
+          format: date-time
+        csrf_token:
+          type: string
+    SessionUser:
+      type: object
+      required: [id, username]
+      properties:
+        id:
+          type: integer
+          format: int64
+        username:
+          type: string
+    CreateJobForm:
+      type: object
+      required: [name, images]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        max_width:
+          type: integer
+          minimum: 1
+          maximum: 8192
+          default: 1600
+        jpeg_quality:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 85
+        priority:
+          $ref: "#/components/schemas/Priority"
+        available_at:
+          type: string
+          format: date-time
+        images:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+            format: binary
+    CreateScheduleForm:
+      type: object
+      required: [name, interval_seconds, anchor_at, images]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        interval_seconds:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+        anchor_at:
+          type: string
+          format: date-time
+        max_width:
+          type: integer
+          minimum: 1
+          maximum: 8192
+          default: 1600
+        jpeg_quality:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 85
+        priority:
+          $ref: "#/components/schemas/Priority"
+        images:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+            format: binary
+    UpdateScheduleRequest:
+      type: object
+      additionalProperties: false
+      required: [name, enabled, interval_seconds, anchor_at, priority, max_width, jpeg_quality]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        enabled:
+          type: boolean
+        interval_seconds:
+          type: integer
+          minimum: 60
+          maximum: 31536000
+        anchor_at:
+          type: string
+          format: date-time
+        priority:
+          $ref: "#/components/schemas/Priority"
+        max_width:
+          type: integer
+          minimum: 1
+          maximum: 8192
+        jpeg_quality:
+          type: integer
+          minimum: 1
+          maximum: 100
+    Priority:
+      type: string
+      enum: [high, normal, low]
+      default: normal
+    JobStatus:
+      type: string
+      enum: [queued, running, retry_waiting, cancel_requested, succeeded, failed, cancelled]
+    AttemptStatus:
+      type: string
+      enum: [running, succeeded, failed, cancelled]
+    Progress:
+      type: object
+      required: [completed, total]
+      properties:
+        completed:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+    ImageSettings:
+      type: object
+      required: [max_width, jpeg_quality, output_media_type, transparency_background]
+      properties:
+        max_width:
+          type: integer
+        jpeg_quality:
+          type: integer
+        output_media_type:
+          type: string
+          enum: [image/jpeg]
+        transparency_background:
+          type: string
+          enum: [white]
+    Artifact:
+      type: object
+      required: [id, item_index, filename, media_type, byte_size, width, height, download_url]
+      properties:
+        id:
+          type: integer
+          format: int64
+        item_index:
+          type: integer
+        filename:
+          type: string
+        media_type:
+          type: string
+          enum: [image/jpeg, image/png]
+        byte_size:
+          type: integer
+          format: int64
+        width:
+          type: integer
+        height:
+          type: integer
+        download_url:
+          type: string
+          nullable: true
+    AttemptWorker:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+    Attempt:
+      type: object
+      required:
+        - id
+        - number
+        - status
+        - progress
+        - started_at
+        - finished_at
+        - duration_ms
+        - queue_wait_ms
+        - encoding_duration_ms
+        - error_kind
+        - error_message
+        - worker
+        - lease_expires_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        number:
+          type: integer
+          minimum: 1
+        status:
+          $ref: "#/components/schemas/AttemptStatus"
+        progress:
+          $ref: "#/components/schemas/Progress"
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+        queue_wait_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        encoding_duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        error_kind:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        worker:
+          allOf:
+            - $ref: "#/components/schemas/AttemptWorker"
+          nullable: true
+        lease_expires_at:
+          type: string
+          format: date-time
+          nullable: true
+    JobResult:
+      type: object
+      required: [message, duration_ms]
+      properties:
+        message:
+          type: string
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+    Job:
+      type: object
+      required:
+        - id
+        - name
+        - job_type
+        - status
+        - progress
+        - delay_ms
+        - image_settings
+        - inputs
+        - outputs
+        - attempts
+        - available_at
+        - priority
+        - schedule_id
+        - scheduled_for
+        - max_attempts
+        - retry_of_job_id
+        - result
+        - failure_message
+        - cancel_requested_at
+        - created_at
+        - started_at
+        - finished_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        job_type:
+          type: string
+          enum: [demo_delay, image_resize]
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        progress:
+          $ref: "#/components/schemas/Progress"
+        delay_ms:
+          type: integer
+          format: int64
+          nullable: true
+        image_settings:
+          allOf:
+            - $ref: "#/components/schemas/ImageSettings"
+          nullable: true
+        inputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Artifact"
+        outputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Artifact"
+        attempts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Attempt"
+        available_at:
+          type: string
+          format: date-time
+        priority:
+          $ref: "#/components/schemas/Priority"
+        schedule_id:
+          type: integer
+          format: int64
+          nullable: true
+        scheduled_for:
+          type: string
+          format: date-time
+          nullable: true
+        max_attempts:
+          type: integer
+        retry_of_job_id:
+          type: integer
+          format: int64
+          nullable: true
+        result:
+          allOf:
+            - $ref: "#/components/schemas/JobResult"
+          nullable: true
+        failure_message:
+          type: string
+          nullable: true
+        cancel_requested_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+    Worker:
+      type: object
+      required:
+        - id
+        - name
+        - status
+        - concurrency_limit
+        - lease_duration_seconds
+        - active_attempts
+        - started_at
+        - last_heartbeat_at
+        - heartbeat_expires_at
+        - stopped_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [online, offline, stopped]
+        concurrency_limit:
+          type: integer
+        lease_duration_seconds:
+          type: integer
+        active_attempts:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        heartbeat_expires_at:
+          type: string
+          format: date-time
+        stopped_at:
+          type: string
+          format: date-time
+          nullable: true
+    ScheduleInput:
+      type: object
+      required: [id, item_index, filename, media_type, byte_size, width, height]
+      properties:
+        id:
+          type: integer
+          format: int64
+        item_index:
+          type: integer
+        filename:
+          type: string
+        media_type:
+          type: string
+          enum: [image/jpeg, image/png]
+        byte_size:
+          type: integer
+          format: int64
+        width:
+          type: integer
+        height:
+          type: integer
+    ScheduleOccurrence:
+      type: object
+      required: [id, scheduled_for, outcome, job_id, job_status, reason, coalesced_slots, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        scheduled_for:
+          type: string
+          format: date-time
+        outcome:
+          type: string
+          enum: [created, skipped_overlap]
+        job_id:
+          type: integer
+          format: int64
+          nullable: true
+        job_status:
+          allOf:
+            - $ref: "#/components/schemas/JobStatus"
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+        coalesced_slots:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+    Schedule:
+      type: object
+      required:
+        - id
+        - name
+        - enabled
+        - interval_seconds
+        - anchor_at
+        - next_run_at
+        - priority
+        - image_settings
+        - inputs
+        - occurrences
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        enabled:
+          type: boolean
+        interval_seconds:
+          type: integer
+        anchor_at:
+          type: string
+          format: date-time
+        next_run_at:
+          type: string
+          format: date-time
+        priority:
+          $ref: "#/components/schemas/Priority"
+        image_settings:
+          $ref: "#/components/schemas/ImageSettings"
+        inputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScheduleInput"
+        occurrences:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScheduleOccurrence"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            field:
+              type: string

@@ -1,0 +1,15 @@
+{
+  "captured_at_utc": "2026-09-21T12:07:47.527Z",
+  "first_job_id": 1,
+  "first_job_outputs": 10,
+  "downloaded_artifact_verified": true,
+  "cancelled_job_id": 2,
+  "retry_job_id": 3,
+  "schedule_id": 1,
+  "recovery_job_id": 5,
+  "recovery_attempts": 2,
+  "recovery_workers": [
+    "demo-primary",
+    "demo-recovery"
+  ]
+}

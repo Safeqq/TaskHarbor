@@ -1,0 +1,217 @@
+# Progress
+
+Fase aktif: 9 (selesai)
+Sublangkah berikutnya: latihan menjelaskan desain dalam dua menit; hosting publik tetap opsional
+Status: complete; local verification and every GitHub CI gate pass
+
+## Implementasi selesai
+
+- Sublangkah 0.1: Rust/Cargo, Node/npm, Git, dan ketersediaan Docker diperiksa.
+- Sublangkah 0.2: Git repository, Cargo workspace minimal, `.gitignore`, `.env.example`, dan README awal dibuat.
+- Sublangkah 0.3: istilah job, attempt, queue, scheduler, API, dan worker dijelaskan di `docs/glossary.md`.
+- Sublangkah 0.4: library `taskharbor-core`, validasi nama job, tiga unit test batas validasi, dan binary `taskharbor-api` dibuat.
+- Versi Rust dipin ke 1.95.0 dan `Cargo.lock` dibuat agar build dapat diulang dengan dependency yang terkunci.
+- Sublangkah 1.1: `JobId`, `JobStatus`, dan entitas `Job` ditambahkan ke domain; DTO HTTP tetap berada di executable API.
+- Sublangkah 1.2: health check serta endpoint create, list, dan detail job ditambahkan.
+- Sublangkah 1.3: penyimpanan memori memakai `tokio::sync::RwLock` dengan bagian kritis singkat dan tanpa `.await` lain saat guard aktif.
+- Sublangkah 1.4: bentuk error JSON konsisten, contoh curl terverifikasi, dan integration test HTTP ditambahkan.
+- Sublangkah 2.1: migration `jobs` dan `job_attempts`, adapter SQLx PostgreSQL, serta persistence setelah reconnect telah dibuat dan diverifikasi.
+- Sublangkah 2.2: executable `taskharbor-worker` dan claim transaksional `FOR UPDATE SKIP LOCKED` telah dibuat dan diverifikasi.
+- Sublangkah 2.3: worker menjalankan `demo_delay` dengan timer async setelah transaksi claim selesai.
+- Sublangkah 2.4: progress, hasil sederhana, attempt, dan shutdown kooperatif setelah job aktif selesai telah dibuat dan diverifikasi.
+- Sublangkah 3.1: dashboard React dan TypeScript memiliki halaman Jobs, form create, daftar yang dapat dipilih dengan keyboard, dan Job Detail.
+- Sublangkah 3.2: frontend memakai API nyata dan polling berurutan setiap dua detik; request aktif dibatalkan dan timer dibersihkan saat unmount.
+- Sublangkah 3.3: status queued/running/succeeded/failed, progress, waktu, durasi aktual, dan hasil worker ditampilkan.
+- Sublangkah 3.4: loading, empty, initial error, refresh error, validasi form, label, fokus keyboard, dan layout responsif telah dibuat.
+- Sublangkah 4.1: upload multipart dan metadata input ditambahkan dengan batas 10 file, 5 MiB per file, 25 MiB total, 12 megapixel, serta dimensi maksimum 12000 pixel.
+- Sublangkah 4.2: JPEG/PNG dikenali dari isi file; data korup, format lain, APNG, dan dimensi berlebih ditolak. Storage key dibuat server dan nama klien hanya disimpan sebagai label aman.
+- Sublangkah 4.3: worker menghasilkan JPEG dengan aspect ratio tetap, tidak melakukan upscale, memvalidasi quality 1–100, dan meratakan transparansi PNG ke latar putih.
+- Sublangkah 4.4: decode/resize/encode dijalankan melalui `spawn_blocking` yang dibatasi semaphore. Output disimpan per attempt dan manifest baru dipublikasikan setelah semua item berhasil.
+- Sublangkah 4.5: dashboard menampilkan pilihan banyak file, pengaturan resize, progress per item, ukuran serta dimensi input/output, pesan gagal, dan tautan unduhan.
+- Sublangkah 5.1: error pemrosesan diklasifikasikan sebagai transient atau permanent; file rusak dan pengaturan invalid tidak dijadwalkan ulang.
+- Sublangkah 5.2: automatic retry memakai status `retry_waiting`, waktu database `available_at`, backoff eksponensial berbatas 60 detik, default tiga attempt, dan histori error aman per attempt.
+- Sublangkah 5.3: endpoint cancel mengubah job pending langsung menjadi `cancelled` dan job berjalan menjadi `cancel_requested` secara idempotent.
+- Sublangkah 5.4: worker memeriksa cancel pada batas aman antaritem dan sebelum publikasi; finalisasi transaksional memastikan cancel atau completion menjadi satu-satunya pemenang.
+- Sublangkah 5.5: manual retry membuat job baru yang terhubung melalui `retry_of_job_id`, memakai kembali input sumber, dan tidak mengubah histori job lama.
+- Dashboard menampilkan tujuh status lifecycle, waktu retry berikutnya, jumlah attempt, histori eksekusi, cancel, serta manual retry.
+- Sublangkah 6.1: job one-off menerima `available_at`; claim memakai waktu database dan dashboard menampilkan future queued job sebagai Scheduled.
+- Sublangkah 6.2: priority `high`, `normal`, dan `low` ditambahkan. Claim memilih priority tertinggi lalu `available_at` dan ID tanpa menghentikan job yang sedang berjalan.
+- Sublangkah 6.3: tabel `schedules`, `schedule_inputs`, dan `schedule_occurrences` menyimpan template, input yang dipertahankan, cursor, serta uniqueness `(schedule_id, scheduled_for)`.
+- Sublangkah 6.4: scheduler interval tetap memakai anchor UTC, coalesce slot lama, no-overlap, cursor transaksional, enable/disable, dan edit future settings.
+- Sublangkah 6.5: halaman Schedules dapat membuat serta mengedit schedule dan menampilkan occurrence yang membuat job atau dilewati.
+- Sublangkah 7.1: worker registration, heartbeat, lease expiry, claim token unik, serta conditional update berbasis owner dan token ditambahkan.
+- Sublangkah 7.2: worker memperbarui lease selama proses; reclaimer transaksional menangani attempt kedaluwarsa sesuai status cancel, retry limit, dan exponential backoff.
+- Sublangkah 7.3: setiap worker memiliki batas concurrency lokal, berhenti mengambil job baru saat shutdown, lalu melakukan drain dengan batas waktu.
+- Sublangkah 7.4: beberapa worker dapat memakai PostgreSQL dan storage bersama; API serta dashboard menampilkan kapasitas, heartbeat, status, dan kepemilikan attempt.
+- Sublangkah 7.5: worker lama ditolak saat menulis progress atau hasil dengan token usang; output dipisahkan per attempt dan output attempt kedaluwarsa dibersihkan saat recovery.
+- Sublangkah 8.1: akun pemilik dikonfigurasi saat startup dengan hash Argon2id; token session dan CSRF acak hanya disimpan sebagai hash, memiliki expiry, dapat dicabut saat logout, dan dikirim melalui cookie `SameSite=Strict` dengan `HttpOnly` pada session.
+- Sublangkah 8.2: seluruh job, schedule, worker, dan artifact route memerlukan session; query resource memeriksa `owner_user_id`, mutasi memerlukan header CSRF, login/upload memiliki rate limit, dan create job mendukung idempotency key per pemilik.
+- Dashboard memiliki restore session, login, logout, pengiriman cookie same-origin, dan header CSRF otomatis untuk mutasi.
+- Sublangkah 8.3: upload dibatasi anggaran storage dan jumlah job aktif; worker menerapkan budget output, retensi output, pembersihan orphan dengan grace period, serta perlindungan input yang direferensikan dan prefix attempt aktif.
+- Sublangkah 8.4: endpoint liveness dipisahkan dari readiness database/storage. API dan worker memakai log JSON terstruktur; claim mencatat queue wait, maintenance mencatat queue depth, dan hasil attempt mencatat duration serta failure kind.
+- Sublangkah 8.5: `scripts/backup.ps1` dan `scripts/restore.ps1` mencadangkan dump PostgreSQL beserta ZIP storage, memverifikasi SHA-256, menolak path ZIP berbahaya, dan mewajibkan konfirmasi bahwa API/worker sudah quiesced.
+- Sublangkah 9.1: GitHub Actions menjalankan format, Clippy, unit test Rust, 17 integration test PostgreSQL nyata, typecheck/test/build frontend, lalu smoke test Compose dari checkout bersih.
+- Sublangkah 9.2: Compose membangun API dan worker release dalam image runtime non-root, membangun web production pada Nginx, menyediakan PostgreSQL dan shared storage, serta membuat sertifikat HTTPS localhost saat container pertama kali dimulai.
+- Sublangkah 9.3: benchmark deterministik menghasilkan tiga PNG sintetis dengan resolusi, byte size, dan SHA-256 tercatat; wrapper mengukur peak working set API dan worker tanpa memasukkan satu warmup job.
+- Sublangkah 9.4: attempt menyimpan queue wait dan durasi pipeline encoding secara terpisah. Laporan juga memisahkan latency/throughput submission API, attempt wall time, end-to-end, memory, output bytes, dan failure rate.
+- Sublangkah 9.5: README bahasa Inggris diperbarui, kontrak OpenAPI 3.0 ditambahkan, dan tiga ADR mendokumentasikan PostgreSQL queue, lease/fencing, serta anchored interval scheduling.
+- Sublangkah 9.6: demo nyata menghasilkan delapan screenshot 1440 x 1000 dan video H.264 3:09.852 yang mencakup upload, progress, download, manual retry, schedule, worker kill, lease expiry, dan recovery attempt.
+
+## Bukti verifikasi
+
+- 2026-09-17: `rustc 1.95.0`, `cargo 1.95.0`, `rustfmt 1.9.0-stable`, dan `clippy 0.1.95` tersedia.
+- 2026-09-17: Node.js `v24.11.1`, npm `11.6.2`, dan Git `2.52.0.windows.1` tersedia.
+- 2026-09-17: command `docker --version` dan `docker compose version` gagal karena executable Docker tidak ditemukan di `PATH`.
+- 2026-09-17: `cargo test -p taskharbor-core --locked` lulus; 3 test lulus, 0 gagal.
+- 2026-09-17: `cargo fmt --all -- --check` lulus tanpa perubahan.
+- 2026-09-17: `cargo clippy --workspace --all-targets --locked -- -D warnings` lulus tanpa warning.
+- 2026-09-17: `cargo test --workspace --locked` lulus; 3 test lulus, 0 gagal.
+- 2026-09-17: `cargo build --workspace --locked` berhasil membangun seluruh workspace.
+- 2026-09-17: `cargo run -p taskharbor-api --locked` berhasil dan mencetak `TaskHarbor API foundation is ready for job "example-job".`
+- 2026-09-17: `cargo test -p taskharbor-core --locked` lulus; 5 test domain lulus, 0 gagal.
+- 2026-09-17: `cargo test -p taskharbor-api --test jobs_api --locked` lulus; 5 test HTTP lulus, 0 gagal.
+- 2026-09-17: gate Fase 1 `cargo fmt --all -- --check`, Clippy dengan `-D warnings`, build, dan `cargo test --workspace --locked` lulus; total 10 test lulus.
+- 2026-09-17: server nyata dan curl memverifikasi health `200`, create `201`, list/detail `200`, nama kosong `422`, serta ID tidak ditemukan `404`.
+- 2026-09-17: setelah server dihentikan dan dijalankan ulang, `GET /api/v1/jobs` mengembalikan `200` dengan `{"jobs":[]}`, sesuai keterbatasan memory store.
+- 2026-09-18: pemeriksaan awal tidak menemukan Docker/PostgreSQL dan WSL gagal dimulai dengan error layanan `0xd0000022`; PostgreSQL 18.6 kemudian dipasang sebagai service lokal dan menerima koneksi di `127.0.0.1:5432`.
+- 2026-09-18: `cargo fmt --all -- --check`, Clippy dengan `-D warnings`, build workspace, dan tujuh unit test domain lulus.
+- 2026-09-18: test adapter PostgreSQL lulus dan membuktikan persistence, urutan claim, attempt, progress, completion, serta kegagalan pool tidak dilaporkan sebagai claim sukses.
+- 2026-09-18: test API PostgreSQL lulus dan membuktikan health, create/list/detail, validasi, malformed JSON, 404, serta data tetap tersedia melalui koneksi baru.
+- 2026-09-18: test worker PostgreSQL lulus dan membuktikan job aktif diselesaikan sebelum shutdown; tepat satu attempt sukses tercatat.
+- 2026-09-18: demo nyata membuat dua job queued, merestart API, lalu worker menyelesaikan job ID 1 sebelum ID 2. Keduanya menghasilkan progress `1/1`; durasi aktual tercatat 506 ms dan 508 ms.
+- 2026-09-18: `npm run typecheck --prefix apps/web` lulus tanpa error TypeScript.
+- 2026-09-18: `npm ci --prefix apps/web` memasang dependency persis dari lockfile; audit melaporkan nol vulnerability.
+- 2026-09-18: `npm test --prefix apps/web` lulus; delapan test memverifikasi API client, loading/empty/error, create form, serta polling tanpa overlap dan cleanup saat unmount.
+- 2026-09-18: `npm run build --prefix apps/web` berhasil; Vite menghasilkan production bundle tanpa error.
+- 2026-09-18: gate Rust tetap lulus: format bersih, Clippy tanpa warning, serta tujuh unit test lulus dan tiga integration test PostgreSQL tetap opt-in/ignored pada command workspace biasa.
+- 2026-09-18: browser headless Microsoft Edge membuat job melalui form dan menerima HTTP `201`; worker mengubahnya menjadi `succeeded`, dashboard menampilkan progress `1/1` dan hasil `demo delay completed` tanpa refresh manual atau browser error.
+- 2026-09-18: saat API dihentikan, browser menampilkan `Jobs could not be loaded` beserta petunjuk menjalankan API/database dan tidak menampilkan empty state yang menyesatkan.
+- 2026-09-18: unit test image adapter memverifikasi deteksi berdasarkan isi, resize 4×2 menjadi 2×1, tanpa upscale, flatten transparansi menjadi putih, penolakan non-image, dan penolakan storage key tidak aman.
+- 2026-09-18: seluruh lima integration test PostgreSQL opt-in lulus berurutan. Test pipeline memverifikasi upload PNG transparan dengan ekstensi palsu, output JPEG 4×2 yang dapat dibuka, download, file korup `422`, serta file di atas 5 MiB `413` tanpa membuat job.
+- 2026-09-18: test worker memverifikasi bahwa kerusakan item kedua menggagalkan seluruh job, menyimpan progress `1/2`, membersihkan file attempt, dan tidak mempublikasikan satu pun output parsial.
+- 2026-09-18: `npm run typecheck`, sembilan test frontend, dan production build Vite lulus; client multipart tidak mengatur boundary secara manual.
+- 2026-09-18: browser headless Microsoft Edge mengunggah PNG dengan ekstensi `.data`, worker menyelesaikan progress `1/1`, dashboard menampilkan `1/1 published`, dan download 629 byte memiliki signature JPEG tanpa error console.
+- 2026-09-18: gate akhir Fase 4 lulus: `cargo fmt --all -- --check`, Clippy workspace dengan `-D warnings`, 11 unit test Rust, typecheck TypeScript, sembilan test frontend, dan production build Vite semuanya berhasil tanpa kegagalan.
+- 2026-09-19: delapan integration test PostgreSQL opt-in lulus berurutan. Skenario lifecycle membuktikan transient failure pulih pada attempt kedua, limit retry berhenti, corrupt input gagal permanen, cancel membersihkan output, dan dua urutan cancel/completion race masing-masing menghasilkan tepat satu status terminal.
+- 2026-09-19: integration test API membuktikan cancel job pending, conflict untuk retry job nonterminal, serta manual retry membuat job baru yang terhubung dengan metadata input tersalin dan histori kosong.
+- 2026-09-19: browser headless Microsoft Edge membatalkan image job, membuat linked retry, menyelesaikannya pada attempt `1/3`, mengunduh JPEG valid, dan tidak mencatat browser error. Layout desktop dan mobile diperiksa dari hasil nyata tersebut.
+- 2026-09-19: gate akhir Fase 5 lulus: format Rust bersih, Clippy workspace tanpa warning, 12 unit test Rust, delapan integration test PostgreSQL, typecheck TypeScript, 11 test frontend, dan production build Vite berhasil tanpa kegagalan.
+- 2026-09-19: integration test scheduling PostgreSQL lulus dengan clock terkontrol; job tidak diklaim sebelum waktunya, priority terurut, missed slots ter-coalesce, overlap dilewati, restart tidak menggandakan occurrence, dan dua scheduler concurrent hanya membuat satu job per slot.
+- 2026-09-19: integration test API schedule lulus; create/list/detail/update, pause/enable, snapshot input/settings, generated job, dan pemrosesan gambar occurrence diverifikasi melalui PostgreSQL serta storage nyata.
+- 2026-09-19: browser headless Microsoft Edge menampilkan job one-off future sebagai Scheduled, membuat recurring schedule, lalu menampilkan occurrence dan job hasilnya sebagai `succeeded`. Hasil unduhan memiliki signature JPEG, layout desktop/mobile diperiksa, dan tidak ada browser error.
+- 2026-09-19: gate akhir Fase 6 lulus: format Rust bersih, Clippy workspace tanpa warning, 15 unit test Rust, 10 integration test PostgreSQL, typecheck TypeScript, 14 test frontend, dan production build Vite berhasil tanpa kegagalan.
+- 2026-09-20: test adapter PostgreSQL dengan clock terkontrol membuktikan dua claim concurrent mendapat job berbeda, renewal mencegah reclaim, lease kedaluwarsa dijadwalkan ulang, cancel serta retry limit dihormati, dan token lama menerima `ClaimLost`.
+- 2026-09-20: test recovery worker mensimulasikan crash setelah file attempt ditulis tetapi sebelum commit. Worker pengganti membersihkan output lama, menyelesaikan retry, dan hanya mempublikasikan manifest dari token yang masih sah.
+- 2026-09-20: test multi-worker menjalankan dua loop worker pada database dan storage yang sama; keduanya memperoleh job, masing-masing tidak melewati concurrency dua, dan shutdown mencatat status stopped.
+- 2026-09-20: integration test API memverifikasi endpoint worker beserta status heartbeat; dashboard menampilkan worker, kapasitas, active attempts, dan owner pada histori attempt.
+- 2026-09-20: smoke test menjalankan API, Vite, dan dua proses worker nyata bernama `phase7-alpha` serta `phase7-beta`. Endpoint dan Microsoft Edge menampilkan keduanya online dengan kapasitas total empat tanpa alert; kedua worker kemudian berhenti secara graceful.
+- 2026-09-20: gate akhir Fase 7 lulus: format Rust bersih, Clippy workspace tanpa warning, 16 unit test Rust, 14 integration test PostgreSQL, typecheck TypeScript, 16 test frontend, dan production build Vite berhasil tanpa kegagalan.
+- 2026-09-20: `cargo fmt --all -- --check` dan Clippy workspace/all-targets dengan `-D warnings` lulus setelah implementasi keamanan dan maintenance.
+- 2026-09-20: `cargo test --workspace --locked` lulus; 20 unit test lulus dan 17 integration test PostgreSQL tetap opt-in pada command biasa.
+- 2026-09-20: 17 integration test PostgreSQL dijalankan serial dan seluruhnya lulus: 4 adapter, 6 API, serta 7 worker. Test keamanan membuktikan unauthorized `401`, CSRF `403`, cookie flags, session expiry/revoke, ownership `404`, idempotency replay/conflict, rate limit, dan storage budget `507`.
+- 2026-09-20: test maintenance PostgreSQL membuktikan output expired dan orphan terhapus tanpa menghapus input job, input schedule, atau file di prefix attempt aktif. Unit test storage juga membuktikan `..`, absolute path, dan Windows drive path tidak dapat keluar dari root.
+- 2026-09-20: `npm run typecheck`, 19 test frontend, dan production build Vite lulus. Test mencakup login/logout, pemulihan session, cookie credentials, CSRF header, serta seluruh dashboard lama.
+- 2026-09-20: executable API nyata di `127.0.0.1:3108` menghasilkan log JSON; smoke test memberi liveness `200`, readiness `200`, jobs tanpa session `401`, login owner berhasil, logout `204`, dan session lama kembali `401`.
+- 2026-09-20: backup database dan storage dibuat saat quiesced, sumber dikosongkan, lalu dipulihkan. Verifikasi restore membaca `backup proof|inputs/backup-proof/source.png|4` dan file 4 byte dengan SHA-256 `9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a`.
+- 2026-09-21: test keamanan diulang dengan batas satu job aktif. Replay idempoten tetap mengembalikan job pertama, payload berbeda tetap `409`, job baru ditolak `507`, dan file staging dari replay/conflict/limit dibersihkan sehingga byte storage sama dengan artifact yang direferensikan.
+- 2026-09-21: gate lokal Fase 9 lulus: format Rust bersih, Clippy workspace tanpa warning, 20 unit test Rust, seluruh 17 integration test PostgreSQL, typecheck TypeScript, 19 test frontend, dan production build Vite berhasil.
+- 2026-09-21: seluruh migration diterapkan dari nol pada schema PostgreSQL sementara yang terisolasi; integration test pipeline kemudian mengunggah, memproses, dan mengunduh gambar serta membaca metrik attempt dengan sukses sebelum schema khusus itu dibersihkan.
+- 2026-09-22: workflow GitHub Actions pertama untuk commit Fase 9 menjalankan frontend dengan sukses, tetapi berhenti pada unit test Rust sebelum integration test dan Compose smoke. Audit lintas platform menemukan `C:\\outside` masih diterima sebagai storage key pada Unix karena backslash bukan separator native; validasi sekarang menolak backslash dan colon secara eksplisit pada semua OS, dan langkah unit test CI dibatasi ke library tests sebelum suite PostgreSQL tersendiri.
+- 2026-09-22: rerun CI setelah perbaikan portability meluluskan format, Clippy, 20 unit test, 17 integration test PostgreSQL, typecheck, 19 frontend test, dan production build. Compose tervalidasi serta stack berhasil mencapai tahap HTTP smoke, tetapi salah satu request berhenti dengan exit code curl 22. Smoke script sekarang memberikan kode tahap khusus dan response error terbatas agar kegagalan health, login, upload, polling, atau download dapat dibedakan pada rerun tanpa mencetak credential.
+- 2026-09-22: rerun dengan kode tahap meluluskan kembali seluruh gate Rust, PostgreSQL, dan frontend; Compose mencapai liveness serta readiness, lalu gagal dengan kode 33 pada request halaman web. Konfigurasi Nginx kustom belum menetapkan root untuk artifact React, sehingga sekarang server HTTPS memakai `/usr/share/nginx/html` dan `index.html` secara eksplisit.
+- 2026-09-22: [CI run 35743394826](https://github.com/Safeqq/TaskHarbor/actions/runs/35743394826) lulus seluruhnya. Job Rust menjalankan format, Clippy, 20 unit test, dan 17 integration test PostgreSQL; job frontend menjalankan typecheck, 19 test, dan production build; job Compose membangun stack dari checkout, menunggu health checks, login melalui HTTPS, mengunggah PNG sintetis, menunggu worker, lalu mengunduh dan memverifikasi hasil JPEG.
+- 2026-09-21: OpenAPI YAML berhasil diparsing dengan 13 path dan 98 referensi internal yang seluruhnya dapat di-resolve; benchmark JavaScript, wrapper PowerShell, dan smoke script Bash lolos pemeriksaan sintaks.
+- 2026-09-21: benchmark release 12 job/36 gambar setelah satu warmup menghasilkan 12 sukses, 0 gagal, API submission 14.41 job/detik, p95 queue wait 1.164 detik, p95 pipeline encoding 229 ms, p95 end-to-end 1.795 detik, peak API 18.71 MiB, dan peak worker 65.90 MiB.
+- 2026-09-21: demo browser nyata memverifikasi progress 1/10, sepuluh output, signature JPEG hasil download, linked retry, occurrence schedule, worker pertama offline, attempt pertama gagal karena lease expiry, dan attempt kedua sukses pada worker pengganti.
+- 2026-09-21: MP4 demo didekode ulang oleh Edge tanpa error dengan H.264, resolusi 1280 x 720, dan durasi 189.8523 detik. Screenshot sumber memakai data demo nyata, bukan response mock.
+- 2026-09-21: Docker masih tidak tersedia pada mesin ini, sehingga build dan runtime Compose belum dapat dijalankan lokal. Workflow CI dan `scripts/compose-smoke.sh` disiapkan untuk memvalidasi config, empat service, HTTPS login, upload, worker, shared volume, dan download dari checkout bersih setelah push.
+
+## Catatan belajar
+
+- Cargo workspace mengelola beberapa package dengan konfigurasi bersama.
+- Binary memiliki entry point `main` dan dapat dijalankan; library mengekspor kode yang dapat dipakai dan diuji oleh binary lain.
+- Job adalah pekerjaan logis pengguna, sedangkan attempt adalah satu usaha untuk menjalankan job tersebut.
+- Latihan opsional fase 0 belum dikerjakan pengguna.
+- Handler mengubah HTTP menjadi tipe domain dan kembali menjadi JSON; aturan nama tetap berada di domain agar tidak terikat pada Axum.
+- `Result` membawa sukses atau error secara eksplisit sehingga handler dapat memetakan validasi ke status HTTP yang sesuai.
+- `RwLock` memberi banyak pembaca atau satu penulis. Store tidak menjalankan `.await` lain selama guard lock aktif.
+- Latihan opsional fase 1, menambahkan deskripsi job, belum dikerjakan pengguna.
+- Transaksi claim hanya memilih row, mengubah status, dan membuat attempt. Timer job berjalan setelah commit sehingga row lock tidak ditahan selama pekerjaan.
+- Timer Tokio memberi kesempatan task lain berjalan; `std::thread::sleep` akan memblokir thread executor.
+- Latihan opsional fase 2, membuat durasi demo dapat diubah pengguna dengan validasi, belum dikerjakan.
+- React menyimpan data yang berubah sebagai state; perubahan state merender ulang daftar dan detail tanpa memuat ulang halaman.
+- Loading berarti request pertama belum menghasilkan jawaban, sedangkan empty berarti request sudah sukses dan server benar-benar mengembalikan nol job.
+- Polling dijadwalkan setelah request selesai agar tidak overlap. Cleanup timer dan `AbortController` mencegah update dari komponen yang sudah dilepas.
+- Latihan opsional fase 3, menambahkan filter status, belum dikerjakan pengguna.
+- Multipart memungkinkan field teks dan beberapa file dikirim dalam satu request; API menulis chunk langsung ke disk agar body file tidak perlu dikumpulkan penuh di memori.
+- Header gambar cukup untuk memeriksa format dan dimensi sebelum decode pixel yang jauh lebih mahal.
+- `spawn_blocking` memindahkan kerja CPU sinkron dari thread async; semaphore membatasi berapa banyak kerja gambar yang boleh berjalan bersamaan.
+- Manifest output atomik berarti catatan hasil baru terlihat setelah semua item selesai, sementara progress tetap dapat bertambah per item.
+- Latihan opsional fase 4, menambahkan preset ukuran output, belum dikerjakan pengguna.
+- Transient error boleh dicoba ulang karena penyebabnya dapat pulih, sedangkan permanent error berhenti segera karena input yang sama akan menghasilkan kegagalan yang sama.
+- Automatic retry menambah attempt pada job yang sama setelah backoff; manual retry membuat identitas job baru dan menghubungkannya ke job terminal lama.
+- Cancel job berjalan adalah permintaan sampai worker mencapai batas aman. Conditional commit menentukan apakah cancel atau completion yang menjadi terminal state.
+- Latihan opsional fase 5, menampilkan jumlah attempt dan waktu retry berikutnya, sudah diterapkan sebagai bagian dashboard.
+- `available_at` adalah batas eligibility, sedangkan `started_at` adalah waktu worker benar-benar memperoleh dan memulai job.
+- Anchor menjaga interval tidak bergeser karena worker terlambat. Coalesce mencegah ledakan backlog setelah downtime.
+- Uniqueness occurrence dan row lock membuat restart atau scheduler concurrent idempotent pada batas transaksi database.
+- Latihan opsional fase 6, mengamati dua occurrence interval satu menit, belum dikerjakan pengguna.
+- Lease memberi batas waktu kepemilikan attempt, sedangkan fencing token membuktikan bahwa penulis masih memegang claim yang tepat. Keduanya dibutuhkan karena proses lama dapat hidup kembali setelah lease-nya diambil alih.
+- Heartbeat menunjukkan worker baru saja berkomunikasi dengan database. Status `offline` adalah inferensi dari waktu kedaluwarsa, bukan bukti bahwa proses sistem operasi sudah mati.
+- Eksekusi bersifat at-least-once: komputasi fisik dapat terjadi lebih dari sekali setelah crash, tetapi conditional commit menjaga hanya satu manifest sah yang dipublikasikan.
+- Latihan opsional fase 7, mencatat timeline dari worker dihentikan sampai retry selesai, belum dikerjakan pengguna.
+- Authentication membuktikan identitas melalui password dan session, sedangkan authorization membatasi data yang boleh dibaca atau diubah setelah identitas diketahui.
+- CSRF token diperlukan karena browser mengirim cookie session secara otomatis; situs lain tidak boleh dapat membuat mutasi hanya dengan memanfaatkan cookie tersebut.
+- Backup database saja tidak cukup karena PostgreSQL menyimpan metadata artifact, sedangkan byte gambar berada di shared filesystem. Quiesce membuat keduanya berasal dari titik perubahan yang konsisten.
+- Latihan opsional fase 8: buat checklist endpoint dan buktikan satu request tanpa session mendapat `401`; implementasi test sudah tersedia, latihan pengguna belum dikerjakan.
+- Queue wait mengukur selang dari job eligible sampai attempt diklaim; pipeline encoding mengukur decode, resize, JPEG encode, dan penulisan output yang dijalankan sebagai satu operasi blocking.
+- Benchmark perlu menyatakan dataset, concurrency, build, dan mesin karena angka tanpa kondisi tersebut tidak dapat dibandingkan secara jujur.
+- Dalam run lokal Fase 9, p95 queue wait lebih besar daripada p95 pipeline encoding. Burst 12 job pada concurrency worker dua adalah penjelasan yang konsisten, tetapi satu run belum cukup menjadi target kapasitas.
+
+## Keputusan dan keterbatasan
+
+- Pada Fase 0, workspace dimulai hanya dengan `apps/api` dan `crates/core`; adapter dan executable lain baru ditambahkan saat fasenya membutuhkan.
+- Validasi nama job menolak nilai kosong dan nilai di atas 100 karakter. Panjang dihitung berdasarkan karakter Unicode, bukan byte UTF-8.
+- `.env.example` menjadi template saja; executable membaca environment dan tidak memuat file `.env` secara otomatis.
+- DTO request/response dan Serde berada di API; crate domain tidak bergantung pada framework transport.
+- Fase 1 hanya memperkenalkan status `queued`; status eksekusi ditambahkan bersama worker pada Fase 2.
+- API bind ke `127.0.0.1` secara default dan belum ditujukan untuk diekspos ke jaringan publik.
+- PostgreSQL menjadi sumber data tunggal untuk API dan worker; memory store Fase 1 telah dihapus dari jalur produksi.
+- Worker mengambil job sampai batas concurrency lokal, berhenti menerima claim baru setelah Ctrl+C, dan menunggu job aktif selama shutdown grace period.
+- Docker tetap belum terpasang; PostgreSQL native 18.6 tersedia dan Compose tetap disediakan untuk setup yang dapat diulang pada mesin lain.
+- Dashboard memakai Vite development proxy menuju API lokal agar alur browser tetap same-origin tanpa menambah konfigurasi CORS pada fase ini.
+- Frontend mempertahankan data terakhir ketika refresh berikutnya gagal dan menampilkan peringatan bahwa live update berhenti; kegagalan request pertama memakai error state penuh.
+- React 19.3, Vite 8.3, TypeScript 7.0, dan dependency test dikunci dalam `apps/web/package-lock.json`; versi Node lokal dipin melalui `.node-version`.
+- Fase 3 tetap memakai polling dan satu halaman. WebSocket, status filter, routing, dan deployment bundle web ditunda sesuai lingkup roadmap.
+- Input dibatasi 10 file, 5 MiB per file, 25 MiB total, 12 megapixel, dan 12000 pixel per sisi. Output selalu JPEG dengan maximum width 8192 dan quality 1–100.
+- Resize tidak memperbesar gambar kecil. Output JPEG tidak diklaim selalu lebih kecil daripada input karena ukuran akhir bergantung pada konten dan quality.
+- Satu item gagal membuat job `failed`; file output attempt dibersihkan dan tidak ada artifact output yang dapat diunduh.
+- Storage lokal dan PostgreSQL tidak memiliki transaksi bersama. Maintenance membersihkan file tanpa referensi setelah grace period satu jam; jendela tersebut sengaja dipertahankan agar commit ambigu atau upload aktif tidak kehilangan file.
+- Batas concurrency job dan batas `spawn_blocking` terpisah agar jumlah claim aktif dan pekerjaan CPU dapat dikendalikan secara independen.
+- `max_attempts` default tiga sudah mencakup usaha pertama. Backoff automatic retry memakai 1, 2, 4 detik dan dibatasi 60 detik berdasarkan waktu PostgreSQL.
+- Cancel bersifat kooperatif. Permintaan tidak menghentikan `spawn_blocking` yang sudah berjalan; worker menyelesaikan item aktif lalu berhenti pada batas aman berikutnya.
+- Manual retry berbagi file input fisik dengan job asal melalui metadata artifact baru. Cleanup membangun himpunan seluruh storage key yang masih dirujuk sebelum menghapus orphan.
+- Worker memakai waktu PostgreSQL untuk keputusan lease dan heartbeat agar beberapa proses tidak bergantung pada sinkronisasi jam lokal.
+- Recovery menjamin at-least-once execution dan satu final manifest yang sah, bukan exactly-once computation. Proses `spawn_blocking` yang telah berjalan tidak dapat dibatalkan paksa; fencing mencegah hasil usang dipublikasikan.
+- Multi-worker Fase 7 ditujukan untuk satu host dengan direktori storage bersama. Filesystem lokal lintas host belum didukung.
+- Reclaimer membersihkan direktori attempt kedaluwarsa yang dikenalnya. Maintenance tambahan menghapus orphan lama, sedangkan prefix attempt `running` dilindungi walaupun manifest output belum ada.
+- Interval recurring dibatasi 60 detik sampai satu tahun. Cron expression dan aturan DST belum didukung; input dashboard dikonversi menjadi UTC.
+- Schedule yang diaktifkan kembali atau diedit melanjutkan dari slot future berikutnya. Perubahan hanya menjadi snapshot pada job occurrence baru.
+- Jika server tertinggal, hanya slot due terakhir yang dipertimbangkan; jumlah slot lama dicatat sebagai `coalesced_slots`. Jika occurrence lama masih nonterminal, slot itu dicatat `skipped_overlap`.
+- Priority memengaruhi claim berikutnya tanpa preemption. Banyak job high dapat menunda low; fairness tambahan belum diterapkan.
+- Input schedule dan job occurrence berbagi file fisik melalui metadata berbeda. Query referensi cleanup mencakup `schedule_inputs`, sehingga file dipertahankan selama schedule masih menyimpannya.
+- Rate limit Fase 8 berada di memori setiap proses API dan ditujukan untuk demo satu instance; deployment dengan beberapa API memerlukan limiter bersama.
+- Pemeriksaan batas job aktif diserialisasi oleh API instance bersama upload. Deployment dengan beberapa API memerlukan admission check transaksional di database.
+- Cookie `Secure` dinonaktifkan hanya untuk HTTP localhost. Bind non-loopback ditolak kecuali remote access dan secure cookie diaktifkan, dan deployment tersebut tetap harus berada di belakang HTTPS.
+- Output default dipertahankan tujuh hari, orphan memakai grace satu jam, storage budget default 1 GiB, dan maksimal 100 job aktif per pemilik. Semua nilai operasional dapat diubah melalui environment.
+- Backup/restore memerlukan API dan semua worker berhenti. Script tidak mencoba membuat snapshot filesystem dan database secara atomik saat proses masih menulis.
+- Compose sengaja memakai HTTPS localhost dengan sertifikat self-signed yang dibuat runtime agar cookie `Secure` tetap berfungsi tanpa menyimpan private key di Git. Browser memerlukan exception sertifikat lokal.
+- PostgreSQL dan storage memakai named volume terpisah; prosedur backup quiesced tetap diperlukan untuk snapshot yang konsisten.
+- Angka benchmark Fase 9 berasal dari satu run pada working tree sebelum commit dan dilabeli `git_worktree_dirty: true`; angka tersebut adalah bukti workload, bukan SLO atau klaim kapasitas umum.
+- Video demo tanpa voice-over dan hosting publik tidak termasuk repository. File MP4 ber-caption serta screenshot asli disimpan sebagai bukti lokal yang dapat ditinjau di GitHub.
+- Runtime Compose masih menunggu eksekusi CI karena Docker tidak terpasang lokal; tidak ada hasil container yang diklaim sebelum job tersebut benar-benar berjalan.
+
+## Langkah berikutnya
+
+- Commit Fase 9, dorong branch, lalu pastikan job `Compose smoke test` hijau. Jika gagal, gunakan log service yang otomatis dicetak oleh `scripts/compose-smoke.sh`.
+- Setelah CI hijau, proyek telah mencapai gate akhir roadmap. Hosting publik tetap opsional.
